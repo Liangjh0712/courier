@@ -1,17 +1,20 @@
 import AppKit
 import CourierKit
 
-/// When the box is put away, a small round button stays on the desktop: faint
-/// until pointed at, a dot when a draft is waiting; a click brings the box
-/// back. It can be dragged anywhere and settles against the nearer side edge.
+/// The box put away: a small round button where the box's left end was, the
+/// same card. Faint until pointed at, a dot when a draft is waiting; a click
+/// opens the box from here. Dragged, it takes the box's place with it.
 final class Bubble: NSObject {
     static let size: CGFloat = 44
-    static let idleAlpha: CGFloat = 0.3
+    static let idleAlpha: CGFloat = 0.35
 
     var onClick: (() -> Void)?
+    var onMoved: ((NSPoint) -> Void)?
     var hasDraft = false {
         didSet { dot?.isHidden = !hasDraft }
     }
+    var isVisible: Bool { panel?.isVisible ?? false }
+    var origin: NSPoint { panel.frame.origin }
     private var panel: NSPanel!
     private var dot: NSView!
 
@@ -21,13 +24,12 @@ final class Bubble: NSObject {
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isFloatingPanel = true
         panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
-        panel.alphaValue = Bubble.idleAlpha
 
         let view = BubbleView(frame: NSRect(x: 0, y: 0, width: s, height: s))
         view.bubble = self
@@ -35,29 +37,27 @@ final class Bubble: NSObject {
 
         let icon = NSImageView(frame: NSRect(x: 11, y: 11, width: 22, height: 22))
         icon.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "Courier")
-        icon.symbolConfiguration = .init(pointSize: 17, weight: .medium)
-        icon.contentTintColor = .labelColor
+        icon.symbolConfiguration = .init(pointSize: 16, weight: .semibold)
+        icon.contentTintColor = .controlAccentColor
         view.addSubview(icon)
 
-        dot = NSView(frame: NSRect(x: s - 15, y: s - 15, width: 9, height: 9))
+        dot = NSView(frame: NSRect(x: s - 14, y: s - 14, width: 8, height: 8))
         dot.wantsLayer = true
         dot.layer?.backgroundColor = NSColor.systemRed.cgColor
-        dot.layer?.cornerRadius = 4.5
+        dot.layer?.cornerRadius = 4
         dot.isHidden = !hasDraft
         view.addSubview(dot)
-
-        if let o = UserDefaults.standard.string(forKey: "bubbleOrigin") {
-            panel.setFrameOrigin(NSPointFromString(o))
-        } else if let v = NSScreen.main?.visibleFrame {
-            panel.setFrameOrigin(NSPoint(x: v.maxX - s - 8, y: v.midY))
-        }
-        settle(animate: false)
     }
 
-    func show() {
-        settle(animate: false)
-        panel.alphaValue = Bubble.idleAlpha
+    func show(at o: NSPoint) {
+        panel.setFrameOrigin(o)
+        keepOnScreen()
+        panel.alphaValue = 0
         panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15
+            panel.animator().alphaValue = Bubble.idleAlpha
+        }
     }
 
     func hide() { panel?.orderOut(nil) }
@@ -76,26 +76,27 @@ final class Bubble: NSObject {
         panel.setFrameOrigin(o)
     }
 
+    fileprivate func dropped() {
+        keepOnScreen()
+        onMoved?(panel.frame.origin)
+    }
+
     fileprivate func click() {
         trace("bubble clicked")
         onClick?()
     }
 
-    /// Against the nearer left or right edge of its screen, inside it vertically.
-    fileprivate func settle(animate: Bool) {
-        guard let screen = panel.screen ?? NSScreen.main else { return }
-        let v = screen.visibleFrame
+    private func keepOnScreen() {
+        let f = panel.frame
+        guard let v = (NSScreen.screens.first { $0.frame.intersects(f) } ?? NSScreen.main)?.visibleFrame else { return }
         let s = Bubble.size
-        var f = panel.frame
-        f.origin.x = f.midX < v.midX ? v.minX + 6 : v.maxX - s - 6
-        f.origin.y = min(max(f.origin.y, v.minY + 6), v.maxY - s - 6)
-        panel.setFrame(f, display: true, animate: animate)
-        UserDefaults.standard.set(NSStringFromPoint(f.origin), forKey: "bubbleOrigin")
+        panel.setFrameOrigin(NSPoint(x: min(max(f.minX, v.minX + 6), v.maxX - s - 6),
+                                     y: min(max(f.minY, v.minY + 6), v.maxY - s - 6)))
     }
 
     fileprivate func menu() -> NSMenu {
         let m = NSMenu()
-        let open = NSMenuItem(title: "显示输入框", action: #selector(openBox), keyEquivalent: "")
+        let open = NSMenuItem(title: "展开输入框", action: #selector(openBox), keyEquivalent: "")
         open.target = self
         m.addItem(open)
         let off = NSMenuItem(title: "不再显示悬浮球", action: #selector(turnOff), keyEquivalent: "")
@@ -115,29 +116,21 @@ final class Bubble: NSObject {
     }
 }
 
-private final class BubbleView: NSVisualEffectView {
+private final class BubbleView: CardView {
     weak var bubble: Bubble?
     private var start: NSPoint?
     private var moved = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        material = .hudWindow
-        blendingMode = .behindWindow
-        state = .active
-        maskImage = NSImage(size: frame.size, flipped: false) { r in
-            NSColor.black.setFill()
-            NSBezierPath(ovalIn: r).fill()
-            return true
-        }
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+        radius = frame.height / 2
+        onHover = { [weak self] inside in self?.bubble?.hover(inside) }
     }
 
     required init?(coder: NSCoder) { fatalError("not coded") }
 
+    override var mouseDownCanMoveWindow: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func mouseEntered(with event: NSEvent) { bubble?.hover(true) }
-    override func mouseExited(with event: NSEvent) { bubble?.hover(false) }
 
     override func mouseDown(with event: NSEvent) {
         start = NSEvent.mouseLocation
@@ -154,7 +147,7 @@ private final class BubbleView: NSVisualEffectView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        if moved { bubble?.settle(animate: true) } else { bubble?.click() }
+        if moved { bubble?.dropped() } else { bubble?.click() }
         start = nil
     }
 

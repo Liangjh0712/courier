@@ -7,10 +7,34 @@ final class Panel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
-/// The box's background; tells when the mouse comes over it and leaves.
-final class HoverView: NSVisualEffectView {
+/// A plain card: the text background color (white, or dark in dark mode),
+/// a hairline edge, round corners; tells when the mouse comes over it. Its
+/// empty parts drag the window.
+class CardView: NSView {
     var onHover: ((Bool) -> Void)?
+    var radius: CGFloat = 22 {
+        didSet { layer?.cornerRadius = radius }
+    }
     private var area: NSTrackingArea?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = radius
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 0.5
+        layer?.masksToBounds = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("not coded") }
+
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        layer?.borderColor = NSColor.separatorColor.cgColor
+    }
+
+    override var mouseDownCanMoveWindow: Bool { true }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -24,6 +48,56 @@ final class HoverView: NSVisualEffectView {
     override func mouseExited(with event: NSEvent) { onHover?(false) }
 }
 
+/// A small round icon button, tinted, for the box's row.
+func iconButton(_ symbol: String, _ tip: String, _ target: AnyObject, _ action: Selector) -> NSButton {
+    let b = NSButton()
+    b.isBordered = false
+    b.imagePosition = .imageOnly
+    b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
+    b.symbolConfiguration = .init(pointSize: 14, weight: .regular)
+    b.contentTintColor = .secondaryLabelColor
+    b.toolTip = tip
+    b.target = target
+    b.action = action
+    b.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([b.widthAnchor.constraint(equalToConstant: 26), b.heightAnchor.constraint(equalToConstant: 28)])
+    return b
+}
+
+/// The send button: an accent-colored circle with an arrow.
+final class SendButton: NSButton {
+    var onMenu: (() -> NSMenu)?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        isBordered = false
+        imagePosition = .imageOnly
+        image = NSImage(systemSymbolName: "arrow.up", accessibilityDescription: "发送")
+        symbolConfiguration = .init(pointSize: 13, weight: .bold)
+        contentTintColor = .white
+        wantsLayer = true
+        layer?.cornerRadius = 14
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([widthAnchor.constraint(equalToConstant: 28), heightAnchor.constraint(equalToConstant: 28)])
+    }
+
+    required init?(coder: NSCoder) { fatalError("not coded") }
+
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(isEnabled ? 1 : 0.35).cgColor
+    }
+
+    override var isEnabled: Bool {
+        didSet { needsDisplay = true }
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        guard let m = onMenu?() else { return }
+        NSMenu.popUpContextMenu(m, with: event, for: self)
+    }
+}
+
 /// The text field: plain text, Enter sends, ⇧Enter is a new line, ⌥Enter fills
 /// in without Return; ⌘V and ⌃V take a picture from the clipboard.
 final class Editor: NSTextView {
@@ -31,6 +105,27 @@ final class Editor: NSTextView {
     var onImage: ((Data) -> Void)?
     var onRecall: ((_ step: Int) -> Void)?
     var onClear: (() -> Void)?
+    var onEscape: (() -> Void)?
+    /// Shown while empty.
+    var placeholder = "" {
+        didSet { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard textStorage?.length == 0, !placeholder.isEmpty, !hasMarkedText() else { return }
+        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.placeholderTextColor]
+        let x = textContainerOrigin.x + (textContainer?.lineFragmentPadding ?? 0)
+        (placeholder as NSString).draw(at: NSPoint(x: x, y: textContainerOrigin.y), withAttributes: attrs)
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        needsDisplay = true
+    }
+
+    // Esc puts the box away (an input method composing takes Esc first).
+    override func cancelOperation(_ sender: Any?) { onEscape?() }
 
     /// Pictures dropped in go where they are dropped; text is taken as plain text.
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
@@ -78,7 +173,7 @@ final class Editor: NSTextView {
         case (.command, "a"): selectAll(nil)
         case (.command, "z"): undoManager?.undo()
         case ([.command, .shift], "z"), ([.command, .shift], "Z"): undoManager?.redo()
-        case (.command, "w"): window?.performClose(nil)
+        case (.command, "w"): onEscape?()
         case (.command, "k"): onClear?()
         case (.command, "q"): NSApp.terminate(nil)
         default:

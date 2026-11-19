@@ -5,13 +5,16 @@ import CourierKit
 /// The box: the floating window with the draft, and what it does.
 final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private(set) var panel: Panel!
+    private var card: CardView!
     private var editor: Editor!
     private var scroll: NSScrollView!
-    private let targetButton = NSButton()
-    private let lockButton = NSButton()
-    private let historyButton = NSButton()
-    private let clearButton = NSButton()
+    private var scrollHeight: NSLayoutConstraint!
+    private let chip = NSButton()
+    private let lockBadge = NSImageView()
+    private var clearButton: NSButton!
+    private let sendButton = SendButton()
     private let status = NSTextField(labelWithString: "")
+    private var placing = false
     let tracker = TargetTracker()
     let bubble = Bubble()
     private let sender = Sender()
@@ -28,9 +31,22 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     /// How much of the box shows while it is not in use (the keyboard is
     /// elsewhere and the mouse is not over it).
     static let idleAlpha: CGFloat = 0.35
-    /// The text area grows with the text between these heights.
-    static let minBody: CGFloat = 48
+    /// The text area grows with the text between these heights; one line
+    /// makes the box as high as the bubble, so the bubble is its left end.
+    static let minBody: CGFloat = 28
     static let maxBody: CGFloat = 320
+    static let pad: CGFloat = 8
+
+    /// One place for both: the box's bottom-left corner, which is where the
+    /// bubble sits when the box is put away.
+    private var origin: NSPoint? {
+        get { UserDefaults.standard.string(forKey: "boxOrigin").map(NSPointFromString) }
+        set { UserDefaults.standard.set(newValue.map(NSStringFromPoint), forKey: "boxOrigin") }
+    }
+    private var width: CGFloat {
+        get { UserDefaults.standard.object(forKey: "boxWidth") as? CGFloat ?? 600 }
+        set { UserDefaults.standard.set(newValue, forKey: "boxWidth") }
+    }
 
     static let takeKeyboardKey = "takeKeyboardAfterSend"
     var takeKeyboardAfterSend: Bool {
@@ -44,6 +60,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         tracker.onChange = { [weak self] in self?.renderTarget() }
         tracker.start()
         bubble.onClick = { [weak self] in self?.showBox() }
+        bubble.onMoved = { [weak self] o in self?.origin = o }
         bubble.build()
         renderTarget()
         checkTrust()
@@ -126,6 +143,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         saveTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { [weak self] _ in self?.save() }
         let empty = editor.textStorage!.length == 0
         clearButton.isHidden = empty
+        sendButton.isEnabled = !empty
         bubble.hasDraft = !empty
         fitHeight()
     }
@@ -153,18 +171,70 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     // MARK: actions
 
     func showBox() {
-        bubble.hide()
+        if bubble.isVisible {
+            origin = bubble.origin
+            bubble.hide()
+        }
+        place()
+        let wasHidden = !panel.isVisible
+        if wasHidden { panel.alphaValue = 0 }
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(editor)
         fitHeight()
+        if wasHidden { fade() }
+    }
+
+    /// Puts the box away: it shrinks into the bubble, which takes its place.
+    @objc func collapse() {
+        guard panel.isVisible else { return }
+        save()
+        let at = panel.frame.origin
+        origin = at
+        trace("box put away")
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.15
+            panel.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            self?.panel.orderOut(nil)
+            if Prefs.bubble { self?.bubble.show(at: at) }
+        })
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        panel.orderOut(nil)
-        save()
-        if Prefs.bubble { bubble.show() }
-        trace("box put away")
+        collapse()
         return false
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        if !placing { origin = panel.frame.origin }
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        width = panel.frame.width
+        origin = panel.frame.origin
+    }
+
+    /// The box at its saved place and width, kept on screen.
+    private func place() {
+        var f = panel.frame
+        f.size.width = width
+        if let o = origin { f.origin = o } else if let v = NSScreen.main?.visibleFrame {
+            f.origin = NSPoint(x: v.midX - f.width / 2, y: v.minY + 120)
+        }
+        setFrame(f)
+    }
+
+    private func setFrame(_ frame: NSRect) {
+        var f = frame
+        let screen = NSScreen.screens.first { $0.visibleFrame.intersects(f) } ?? NSScreen.main
+        if let v = screen?.visibleFrame {
+            f.size.width = min(f.width, v.width - 12)
+            f.origin.x = min(max(f.minX, v.minX + 6), v.maxX - f.width - 6)
+            f.origin.y = min(max(f.minY, v.minY + 6), v.maxY - f.height - 6)
+        }
+        placing = true
+        panel.setFrame(f, display: true)
+        placing = false
     }
 
     func windowDidBecomeKey(_ notification: Notification) { fade() }
@@ -181,22 +251,25 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         }
     }
 
-    /// The window as high as the text needs, between minBody and maxBody; the
-    /// top edge stays where it is. Only the width can be dragged.
+    /// The box as high as the text needs, between minBody and maxBody; the
+    /// bottom edge stays (it grows upward, like a chat's input). Only the width
+    /// can be dragged.
     private func fitHeight() {
-        guard let lm = editor.layoutManager, let tc = editor.textContainer, panel != nil else { return }
-        panel.contentView?.layoutSubtreeIfNeeded()
+        guard panel != nil, let lm = editor.layoutManager, let tc = editor.textContainer else { return }
         lm.ensureLayout(for: tc)
         let textH = ceil(lm.usedRect(for: tc).height + editor.textContainerInset.height * 2)
-        let chrome = panel.frame.height - scroll.frame.height
-        let want = chrome + min(max(textH, Box.minBody), Box.maxBody)
-        panel.minSize = NSSize(width: 360, height: want)
+        let body = min(max(textH, Box.minBody), Box.maxBody)
+        scrollHeight.constant = body
+        let want = body + Box.pad * 2
+        panel.minSize = NSSize(width: 320, height: want)
         panel.maxSize = NSSize(width: 1600, height: want)
-        guard abs(panel.frame.height - want) > 0.5 else { return }
-        var f = panel.frame
-        f.origin.y += f.height - want
-        f.size.height = want
-        panel.setFrame(f, display: true)
+        card.radius = want <= 46 ? want / 2 : 18
+        if abs(panel.frame.height - want) > 0.5 {
+            var f = panel.frame
+            f.size.height = want
+            setFrame(f)
+        }
+        panel.invalidateShadow()
     }
 
     @objc func toggleLock() {
@@ -267,6 +340,41 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         panel.makeKeyAndOrderFront(nil)
     }
 
+    @objc private func sendClicked() {
+        submit(insertOnly: NSApp.currentEvent?.modifierFlags.contains(.option) ?? false)
+    }
+
+    @objc private func fillOnly() { submit(insertOnly: true) }
+    @objc private func sendNow() { submit(insertOnly: false) }
+
+    private func sendMenu() -> NSMenu {
+        let m = NSMenu()
+        for (title, sel) in [("发送（Enter）", #selector(sendNow)), ("只填入，不发送（⌥Enter）", #selector(fillOnly))] {
+            let i = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+            i.target = self
+            m.addItem(i)
+        }
+        return m
+    }
+
+    /// The picture button: the picture on the clipboard, else pick image files.
+    @objc private func addPicture() {
+        if let png = clipboardImage() {
+            attach(png)
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let open = NSOpenPanel()
+        open.allowedContentTypes = [.image]
+        open.allowsMultipleSelection = true
+        open.message = "剪贴板里没有图片，选几张图片文件"
+        open.beginSheetModal(for: panel) { [weak self] r in
+            guard r == .OK else { return }
+            for url in open.urls { if let png = pngOfImageFile(url) { self?.attach(png) } }
+            self?.panel.makeFirstResponder(self?.editor)
+        }
+    }
+
     private func submit(insertOnly: Bool) {
         guard !busy else { return }
         let d = draft
@@ -327,6 +435,12 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     @objc private func showTargets(_ sender: NSButton) {
         let menu = NSMenu()
+        if let t = tracker.app {
+            let lock = NSMenuItem(title: "锁定发往 \(t.localizedName ?? "?")（⌘L）", action: #selector(toggleLock), keyEquivalent: "")
+            lock.target = self
+            lock.state = tracker.locked ? .on : .off
+            menu.addItem(lock)
+        }
         let follow = NSMenuItem(title: "跟随前台 App", action: #selector(followFront), keyEquivalent: "")
         follow.target = self
         follow.state = tracker.locked ? .off : .on
@@ -402,51 +516,41 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     private func show(_ s: String, bad: Bool = false, keep: Bool = false) {
         status.stringValue = s
+        status.isHidden = s.isEmpty
         status.textColor = bad ? .systemRed : .secondaryLabelColor
         guard !keep else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-            if self?.status.stringValue == s { self?.status.stringValue = "" }
+            if self?.status.stringValue == s {
+                self?.status.stringValue = ""
+                self?.status.isHidden = true
+            }
         }
     }
 
     private func renderTarget() {
         guard let app = tracker.app else {
-            targetButton.image = NSImage(systemSymbolName: "scope", accessibilityDescription: nil)
-            targetButton.title = "点一下要发往的窗口"
-            lockButton.isHidden = true
+            chip.image = NSImage(systemSymbolName: "scope", accessibilityDescription: nil)
+            chip.toolTip = "还没有发送目标：点一下要发往的窗口"
+            lockBadge.isHidden = true
+            editor.placeholder = "先点一下要发往的窗口，再回来写"
             return
         }
         let img = (app.icon?.copy() as? NSImage) ?? NSImage()
-        img.size = NSSize(width: 16, height: 16)
-        targetButton.image = img
+        img.size = NSSize(width: 22, height: 22)
+        chip.image = img
         let name = app.localizedName ?? "?"
-        targetButton.title = "发往 \(name)"
         let keys = "图片用 " + (Prefs.imageFlags(app) == .maskControl ? "⌃V" : "⌘V")
             + "，发送用 " + (Prefs.sendFlags(app) == .maskCommand ? "⌘回车" : "回车")
-        targetButton.toolTip = "\(keys)。点击可换目标、改按键"
-        lockButton.isHidden = false
-        lockButton.image = NSImage(systemSymbolName: tracker.locked ? "lock.fill" : "lock.open", accessibilityDescription: nil)
-        lockButton.contentTintColor = tracker.locked ? .controlAccentColor : .tertiaryLabelColor
-        lockButton.toolTip = tracker.locked ? "已锁定发往 \(name)，点击解锁（⌘L）" : "点击锁定：一直发往 \(name)（⌘L）"
-    }
-
-    private func iconButton(_ b: NSButton, _ symbol: String, _ tip: String, _ action: Selector) {
-        b.isBordered = false
-        b.imagePosition = .imageOnly
-        b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
-        b.contentTintColor = .tertiaryLabelColor
-        b.toolTip = tip
-        b.target = self
-        b.action = action
+        chip.toolTip = "发往 \(name)\(tracker.locked ? "（已锁定）" : "")。\(keys)。点击换目标、锁定、改按键"
+        lockBadge.isHidden = !tracker.locked
+        editor.placeholder = "发往 \(name) · Enter 发送，⇧Enter 换行"
     }
 
     private func build() {
         panel = Panel(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 150),
-            styleMask: [.nonactivatingPanel, .titled, .closable, .resizable, .fullSizeContentView],
+            contentRect: NSRect(x: 0, y: 0, width: width, height: 44),
+            styleMask: [.nonactivatingPanel, .resizable],
             backing: .buffered, defer: false)
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -454,42 +558,38 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         panel.isMovableByWindowBackground = true
         panel.becomesKeyOnlyIfNeeded = false
         panel.isReleasedWhenClosed = false
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
         panel.delegate = self
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
 
-        let bg = HoverView()
-        bg.material = .popover
-        bg.blendingMode = .behindWindow
-        bg.state = .active
-        bg.onHover = { [weak self] inside in
+        card = CardView()
+        card.onHover = { [weak self] inside in
             self?.hovering = inside
             self?.fade()
         }
-        panel.contentView = bg
+        panel.contentView = card
 
-        targetButton.isBordered = false
-        targetButton.imagePosition = .imageLeading
-        targetButton.font = .systemFont(ofSize: 12, weight: .medium)
-        targetButton.contentTintColor = .secondaryLabelColor
-        targetButton.target = self
-        targetButton.action = #selector(showTargets(_:))
-        targetButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        iconButton(lockButton, "lock.open", "锁定发送目标", #selector(toggleLock))
-        lockButton.isHidden = true
-        iconButton(historyButton, "clock.arrow.circlepath", "发过的内容（⌘↑ ⌘↓ 翻看）", #selector(showHistory(_:)))
-        iconButton(clearButton, "trash", "清空草稿（⌘K）", #selector(clear))
-        clearButton.isHidden = true
-        status.font = .systemFont(ofSize: 12)
-        status.alignment = .right
-        status.lineBreakMode = .byTruncatingTail
-        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let header = NSStackView(views: [targetButton, lockButton, spacer, status, clearButton, historyButton])
-        header.spacing = 6
+        // Left: where it goes. A click opens the target menu.
+        chip.isBordered = false
+        chip.imagePosition = .imageOnly
+        chip.imageScaling = .scaleProportionallyDown
+        chip.target = self
+        chip.action = #selector(showTargets(_:))
+        chip.translatesAutoresizingMaskIntoConstraints = false
+        lockBadge.image = NSImage(systemSymbolName: "lock.circle.fill", accessibilityDescription: "已锁定")
+        lockBadge.contentTintColor = .controlAccentColor
+        lockBadge.translatesAutoresizingMaskIntoConstraints = false
+        lockBadge.isHidden = true
+        chip.addSubview(lockBadge)
+        NSLayoutConstraint.activate([
+            chip.widthAnchor.constraint(equalToConstant: 28), chip.heightAnchor.constraint(equalToConstant: 28),
+            lockBadge.widthAnchor.constraint(equalToConstant: 12), lockBadge.heightAnchor.constraint(equalToConstant: 12),
+            lockBadge.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: 1),
+            lockBadge.bottomAnchor.constraint(equalTo: chip.bottomAnchor, constant: 1),
+        ])
 
-        // TextKit 1, for attachment clicks and measuring the text's height.
+        // Middle: the text, TextKit 1 (for attachment clicks and measuring height).
         let storage = NSTextStorage()
         let layout = NSLayoutManager()
         storage.addLayoutManager(layout)
@@ -503,7 +603,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         editor.allowsUndo = true
         editor.typingAttributes = baseAttributes
         editor.drawsBackground = false
-        editor.textContainerInset = NSSize(width: 2, height: 6)
+        editor.textContainerInset = NSSize(width: 0, height: 5)
         editor.isAutomaticQuoteSubstitutionEnabled = false
         editor.isAutomaticDashSubstitutionEnabled = false
         editor.isAutomaticTextReplacementEnabled = false
@@ -517,34 +617,51 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         editor.onImage = { [weak self] png in self?.attach(png) }
         editor.onRecall = { [weak self] step in self?.recall(step) }
         editor.onClear = { [weak self] in self?.clear() }
+        editor.onEscape = { [weak self] in self?.collapse() }
         scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.documentView = editor
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scrollHeight = scroll.heightAnchor.constraint(equalToConstant: Box.minBody)
 
-        let hint = NSTextField(labelWithString: "Enter 发送 · ⇧Enter 换行 · ⌥Enter 只填不发 · ⌘V 贴截图 · ⌘K 清空")
-        hint.font = .systemFont(ofSize: 11)
-        hint.textColor = .tertiaryLabelColor
-        hint.lineBreakMode = .byTruncatingTail
-        hint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        status.font = .systemFont(ofSize: 12)
+        status.lineBreakMode = .byTruncatingTail
+        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        status.translatesAutoresizingMaskIntoConstraints = false
+        status.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true
+        status.isHidden = true
 
-        let stack = NSStackView(views: [header, scroll, hint])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        bg.addSubview(stack)
+        // Right: the buttons, then send.
+        let picture = iconButton("photo.badge.plus", "加图片：贴剪贴板里的图，没有就选文件（也可 ⌘V 或拖进来）", self, #selector(addPicture))
+        let history = iconButton("clock.arrow.circlepath", "发过的内容（⌘↑ ⌘↓ 翻看）", self, #selector(showHistory(_:)))
+        clearButton = iconButton("trash", "清空草稿（⌘K，⌘Z 撤销）", self, #selector(clear))
+        clearButton.isHidden = true
+        let fold = iconButton("arrow.down.right.and.arrow.up.left", "收起成悬浮球（Esc）", self, #selector(collapse))
+        sendButton.target = self
+        sendButton.action = #selector(sendClicked)
+        sendButton.toolTip = "发送（Enter）。⌥ 点击或右键：只填入不发送"
+        sendButton.onMenu = { [weak self] in self?.sendMenu() ?? NSMenu() }
+        sendButton.isEnabled = false
+
+        let row = NSStackView(views: [chip, scroll, status, picture, history, clearButton, fold, sendButton])
+        row.orientation = .horizontal
+        row.alignment = .bottom
+        row.spacing = 4
+        row.setCustomSpacing(8, after: chip)
+        row.setCustomSpacing(6, after: fold)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(row)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: bg.leadingAnchor, constant: 14),
-            stack.trailingAnchor.constraint(equalTo: bg.trailingAnchor, constant: -14),
-            stack.topAnchor.constraint(equalTo: bg.topAnchor, constant: 26),
-            stack.bottomAnchor.constraint(equalTo: bg.bottomAnchor, constant: -10),
-            header.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            row.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Box.pad),
+            row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Box.pad),
+            row.topAnchor.constraint(equalTo: card.topAnchor, constant: Box.pad),
+            row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -Box.pad),
+            scrollHeight,
         ])
-        panel.setFrameAutosaveName("CourierBox")
-        if !panel.setFrameUsingName("CourierBox") { panel.center() }
+        scroll.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        place()
     }
 }

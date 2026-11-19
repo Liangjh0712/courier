@@ -62,11 +62,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleBubble(_ item: NSMenuItem) {
         Prefs.bubble.toggle()
-        if !Prefs.bubble { box.bubble.hide() } else if !box.panel.isVisible { box.bubble.show() }
+        if !Prefs.bubble { box.bubble.hide() } else if !box.panel.isVisible { box.bubble.show(at: box.panel.frame.origin) }
         refreshMenu()
     }
 
     @objc private func clear(_ item: NSMenuItem) { box.clear() }
+
+    @objc private func collapse(_ item: NSMenuItem) { box.collapse() }
 
     @objc private func openLog(_ item: NSMenuItem) {
         NSWorkspace.shared.open(Paths.log)
@@ -120,7 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let win = NSMenu(title: "窗口")
         win.addItem(item("显示输入框", #selector(showBox(_:)), "0", target: self))
         win.addItem(item("锁定/解锁发送目标", #selector(toggleLock(_:)), "l", target: self))
-        win.addItem(item("收起输入框", #selector(NSWindow.performClose(_:)), "w"))
+        win.addItem(item("收起成悬浮球", #selector(collapse(_:)), "w", target: self))
         let winItem = NSMenuItem()
         winItem.submenu = win
         main.addItem(winItem)
