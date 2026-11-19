@@ -11,6 +11,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private let chip = NSButton()
     private let lockBadge = NSImageView()
     private var clearButton: NSButton!
+    private var fillButton: NSButton!
     private let sendButton = SendButton()
     private let status = NSTextField(labelWithString: "")
     private var placing = false
@@ -146,6 +147,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         let empty = editor.textStorage!.length == 0
         clearButton.isHidden = empty
         sendButton.isEnabled = !empty
+        fillButton.isEnabled = !empty
         bubble.hasDraft = !empty
     }
 
@@ -155,6 +157,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         let empty = editor.textStorage!.length == 0
         clearButton.isHidden = empty
         sendButton.isEnabled = !empty
+        fillButton.isEnabled = !empty
         bubble.hasDraft = !empty
     }
 
@@ -678,18 +681,21 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         clearButton = iconButton("trash", "清空草稿（⌘K，⌘Z 撤销）", self, #selector(clear))
         clearButton.isHidden = true
         let fold = iconButton("arrow.down.right.and.arrow.up.left", "收起成悬浮球（Esc）", self, #selector(collapse))
+        // Fill in without pressing Return: to look it over, or add to it, in the app.
+        fillButton = iconButton("text.insert", "只填入 App，不按回车（⌥Enter）", self, #selector(fillOnly))
+        fillButton.isEnabled = false
         sendButton.target = self
         sendButton.action = #selector(sendClicked)
-        sendButton.toolTip = "发送（Enter）。⌥ 点击或右键：只填入不发送"
+        sendButton.toolTip = "发送：填入 App 并按回车（Enter）"
         sendButton.onMenu = { [weak self] in self?.sendMenu() ?? NSMenu() }
         sendButton.isEnabled = false
 
-        let row = NSStackView(views: [chip, scroll, status, picture, history, clearButton, fold, sendButton])
+        let row = NSStackView(views: [chip, scroll, status, picture, history, clearButton, fold, fillButton, sendButton])
         row.orientation = .horizontal
         row.alignment = .bottom
         row.spacing = 4
         row.setCustomSpacing(8, after: chip)
-        row.setCustomSpacing(6, after: fold)
+        row.setCustomSpacing(6, after: fillButton)
         row.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(row)
         NSLayoutConstraint.activate([
