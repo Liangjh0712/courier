@@ -102,8 +102,34 @@ func pngOfImageFile(_ url: URL) -> Data? {
     return rep.representation(using: .png, properties: [:])
 }
 
+/// The text of what has the keyboard focus (a terminal gives its whole
+/// screen, the input line included), nil when the app doesn't expose it.
+/// Comparing it before and after ⌘V tells whether a paste landed.
+func axValue(_ pid: pid_t) -> String? {
+    let app = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(app, 0.3)
+    var v: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &v) == .success,
+          let el = v, CFGetTypeID(el) == AXUIElementGetTypeID() else { return nil }
+    var val: CFTypeRef?
+    AXUIElementCopyAttributeValue(el as! AXUIElement, kAXValueAttribute as CFString, &val)
+    return val as? String
+}
+
+/// The title of the app's focused window (in a terminal it names the tab).
+func axWindowTitle(_ pid: pid_t) -> String {
+    let app = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(app, 0.3)
+    var w: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &w) == .success,
+          let win = w, CFGetTypeID(win) == AXUIElementGetTypeID() else { return "-" }
+    var t: CFTypeRef?
+    AXUIElementCopyAttributeValue(win as! AXUIElement, kAXTitleAttribute as CFString, &t)
+    return t as? String ?? "-"
+}
+
 /// What has the keyboard focus in an app, as accessibility sees it: its role
-/// and the length of its text (the text growing tells that a paste landed).
+/// and the length of its text.
 func axFocus(_ pid: pid_t) -> String {
     let app = AXUIElementCreateApplication(pid)
     AXUIElementSetMessagingTimeout(app, 0.5)
@@ -195,15 +221,42 @@ final class Sender {
             trace("#\(no) front=\(front) after \(Int(Date().timeIntervalSince(t0) * 1000))ms (\(frontName()))")
             guard front else { finish(.aborted("\(name) 没能切到前面")); return }
             usleep(150_000)
-            trace("#\(no) before: \(axFocus(pid))")
+            trace("#\(no) before: \(axFocus(pid)) window=\"\(preview(axWindowTitle(pid)))\"")
+            // Waits up to `limit` for the focused text to differ from `was`;
+            // the ms it took, nil if it never changed.
+            func changed(from was: String?, limit: Int) -> Int? {
+                let t = Date()
+                while Int(Date().timeIntervalSince(t) * 1000) < limit {
+                    usleep(100_000)
+                    if axValue(pid) != was { return Int(Date().timeIntervalSince(t) * 1000) }
+                }
+                return nil
+            }
             for (i, p) in parts.enumerated() {
                 guard regain() else { finish(.aborted("发送中途切走后，\(name) 没能切回前面")); return }
                 switch p {
                 case .text(let s):
+                    // A paste that doesn't land (seen now and then in a terminal:
+                    // the app is in front, ⌘V goes out, nothing arrives) is pasted
+                    // once more; if the screen still doesn't change, stop with the
+                    // draft kept rather than press Return on nothing.
+                    let was = axValue(pid)
+                    let t = Date()
                     last = DispatchQueue.main.sync { put(string: s) }
                     postKey(keyV, .maskCommand)
-                    usleep(300_000)
-                    trace("#\(no) part \(i) text \(s.count) \"\(preview(s))\" ⌘V -> \(axFocus(pid))")
+                    var took = changed(from: was, limit: 1500)
+                    trace("#\(no) part \(i) text \(s.count) \"\(preview(s))\" ⌘V -> \(took.map { "changed after \($0)ms" } ?? (was == nil ? "unreadable" : "no change")) \(axFocus(pid))")
+                    if took == nil, was != nil {
+                        guard regain() else { finish(.aborted("发送中途切走后，\(name) 没能切回前面")); return }
+                        trace("#\(no) part \(i) paste again, front=\(frontName()) window=\"\(preview(axWindowTitle(pid)))\"")
+                        last = DispatchQueue.main.sync { put(string: s) }
+                        postKey(keyV, .maskCommand)
+                        took = changed(from: was, limit: 1500)
+                        trace("#\(no) part \(i) retry -> \(took.map { "changed after \($0)ms" } ?? "no change")")
+                        guard took != nil else { finish(.aborted("内容没贴进 \(name)")); return }
+                    }
+                    let spent = Date().timeIntervalSince(t)
+                    if spent < 0.3 { usleep(useconds_t((0.3 - spent) * 1_000_000)) }
                 case .image(let png):
                     last = DispatchQueue.main.sync { put(png: png) }
                     postKey(keyV, imageFlags)
@@ -215,10 +268,13 @@ final class Sender {
             if !insertOnly {
                 guard regain() else { finish(.aborted("回车前 \(name) 没能切回前面")); return }
                 usleep(100_000)
+                let was = axValue(pid)
                 postKey(keyReturn, sendFlags)
-                trace("#\(no) \(sendFlags == .maskCommand ? "⌘Return" : "Return")")
+                let took = changed(from: was, limit: 1000)
+                trace("#\(no) \(sendFlags == .maskCommand ? "⌘Return" : "Return") -> \(took.map { "changed after \($0)ms" } ?? (was == nil ? "unreadable" : "no change"))")
+            } else {
+                usleep(300_000)
             }
-            usleep(300_000)
             finish(.sent(returnTo: wentTo))
         }
     }
