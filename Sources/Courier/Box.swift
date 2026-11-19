@@ -8,7 +8,6 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private var card: CardView!
     private var editor: Editor!
     private var scroll: NSScrollView!
-    private var scrollHeight: NSLayoutConstraint!
     private let chip = NSButton()
     private let lockBadge = NSImageView()
     private var clearButton: NSButton!
@@ -31,10 +30,9 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     /// How much of the box shows while it is not in use (the keyboard is
     /// elsewhere and the mouse is not over it).
     static let idleAlpha: CGFloat = 0.35
-    /// The text area grows with the text between these heights; one line
-    /// makes the box as high as the bubble, so the bubble is its left end.
-    static let minBody: CGFloat = 28
-    static let maxBody: CGFloat = 320
+    /// One line high by default, as high as the bubble, so the bubble is its
+    /// left end; drag the edges to make it bigger, the text wraps and scrolls.
+    static let lineHeight: CGFloat = 44
     static let pad: CGFloat = 8
 
     /// One place for both: the box's bottom-left corner, which is where the
@@ -42,6 +40,10 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private var origin: NSPoint? {
         get { UserDefaults.standard.string(forKey: "boxOrigin").map(NSPointFromString) }
         set { UserDefaults.standard.set(newValue.map(NSStringFromPoint), forKey: "boxOrigin") }
+    }
+    private var height: CGFloat {
+        get { UserDefaults.standard.object(forKey: "boxHeight") as? CGFloat ?? Box.lineHeight }
+        set { UserDefaults.standard.set(newValue, forKey: "boxHeight") }
     }
     private var width: CGFloat {
         get { UserDefaults.standard.object(forKey: "boxWidth") as? CGFloat ?? 600 }
@@ -145,7 +147,6 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         clearButton.isHidden = empty
         sendButton.isEnabled = !empty
         bubble.hasDraft = !empty
-        fitHeight()
     }
 
     func textDidChange(_ notification: Notification) { textChanged() }
@@ -187,7 +188,6 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         if wasHidden { panel.alphaValue = 0 }
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(editor)
-        fitHeight()
         if wasHidden { fade() }
     }
 
@@ -218,6 +218,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     func windowDidEndLiveResize(_ notification: Notification) {
         width = panel.frame.width
+        height = panel.frame.height
         origin = panel.frame.origin
     }
 
@@ -225,6 +226,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private func place() {
         var f = panel.frame
         f.size.width = width
+        f.size.height = height
         if let o = origin { f.origin = o } else if let v = NSScreen.main?.visibleFrame {
             f.origin = NSPoint(x: v.midX - f.width / 2, y: v.minY + 120)
         }
@@ -246,11 +248,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) { fade() }
     func windowDidResignKey(_ notification: Notification) { fade() }
-    // Only a resize by hand re-fits (the width changed); our own setFrame calls
-    // would otherwise loop back here (fitHeight → setFrame → didResize → …).
-    func windowDidResize(_ notification: Notification) {
-        if !placing { fitHeight() }
-    }
+    func windowDidResize(_ notification: Notification) { shape() }
 
     /// Out of the way while not in use: faint until written in or pointed at.
     private func fade() {
@@ -262,29 +260,10 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         }
     }
 
-    /// The box as high as the text needs, between minBody and maxBody; the
-    /// bottom edge stays (it grows upward, like a chat's input). Only the width
-    /// can be dragged.
-    private var fitting = false
-
-    private func fitHeight(animate: Bool = false) {
-        guard !fitting else { return }
-        fitting = true
-        defer { fitting = false }
-        guard panel != nil, let lm = editor.layoutManager, let tc = editor.textContainer else { return }
-        lm.ensureLayout(for: tc)
-        let textH = ceil(lm.usedRect(for: tc).height + editor.textContainerInset.height * 2)
-        let body = min(max(textH, Box.minBody), Box.maxBody)
-        scrollHeight.constant = body
-        let want = body + Box.pad * 2
-        panel.minSize = NSSize(width: 320, height: want)
-        panel.maxSize = NSSize(width: 1600, height: want)
-        card.radius = want <= 46 ? want / 2 : 18
-        if abs(panel.frame.height - want) > 0.5 {
-            var f = panel.frame
-            f.size.height = want
-            setFrame(f, animate: animate)
-        }
+    /// A capsule while one line high (like the bubble), round corners when taller.
+    private func shape() {
+        let h = panel.frame.height
+        card.radius = h <= 46 ? h / 2 : 18
         panel.invalidateShadow()
     }
 
@@ -480,7 +459,10 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
             self.editor.typingAttributes = baseAttributes
             self.save()
             self.textChangedQuietly()
-            self.fitHeight(animate: true)
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.12
+                self.editor.animator().alphaValue = 1
+            }
             finish()
         })
     }
@@ -602,7 +584,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     private func build() {
         panel = Panel(
-            contentRect: NSRect(x: 0, y: 0, width: width, height: 44),
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.nonactivatingPanel, .resizable],
             backing: .buffered, defer: false)
         panel.isFloatingPanel = true
@@ -682,7 +664,6 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         scroll.borderType = .noBorder
         scroll.documentView = editor
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        scrollHeight = scroll.heightAnchor.constraint(equalToConstant: Box.minBody)
 
         status.font = .systemFont(ofSize: 12)
         status.lineBreakMode = .byTruncatingTail
@@ -716,9 +697,12 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
             row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Box.pad),
             row.topAnchor.constraint(equalTo: card.topAnchor, constant: Box.pad),
             row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -Box.pad),
-            scrollHeight,
+            scroll.heightAnchor.constraint(equalTo: row.heightAnchor),
         ])
+        panel.minSize = NSSize(width: 320, height: Box.lineHeight)
+        panel.maxSize = NSSize(width: 2400, height: 1600)
         scroll.setContentHuggingPriority(.defaultLow, for: .horizontal)
         place()
+        shape()
     }
 }
