@@ -145,6 +145,14 @@ func axFocus(_ pid: pid_t) -> String {
     return "focus=\(role as? String ?? "?") len=\(len)"
 }
 
+/// Brings an app to the front through accessibility: works when the
+/// system turns down `activate` (asked by an app that isn't active itself).
+func axRaise(_ pid: pid_t) -> Bool {
+    let app = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(app, 0.5)
+    return AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
+}
+
 enum SendOutcome {
     /// returnTo: the app you switched to while it was sending, to go back to.
     case sent(returnTo: NSRunningApplication?)
@@ -164,10 +172,29 @@ final class Sender {
         let imageFlags = Prefs.imageFlags(target)
         let sendFlags = Prefs.sendFlags(target)
         let snap = ClipboardSnapshot.capture()
+        let wasActive = NSApp.isActive
+        let frontAtStart = NSWorkspace.shared.frontmostApplication?.localizedName ?? "-"
         NSApp.yieldActivation(to: target)
         let ok1 = target.activate(from: NSRunningApplication.current, options: [])
         let ok2 = target.activate(options: [.activateIgnoringOtherApps])
-        trace("#\(no) start target=\(name)(\(target.bundleIdentifier ?? "-")) insertOnly=\(insertOnly) parts=\(describe(parts)) activate=\(ok1)/\(ok2) wasActive=\(NSApp.isActive)")
+        trace("#\(no) start target=\(name)(\(target.bundleIdentifier ?? "-")) insertOnly=\(insertOnly) parts=\(describe(parts)) activate=\(ok1)/\(ok2) wasActive=\(wasActive) front=\(frontAtStart)")
+        // The system may turn the request down (seen when you wrote in Courier
+        // straight from another app, Courier itself not active): ask again the
+        // accessibility way, and failing that, as the active app.
+        func push(_ step: Int) {
+            switch step {
+            case 0:
+                let ok = axRaise(pid)
+                trace("#\(no) not in front yet: raise via accessibility -> \(ok)")
+            default:
+                DispatchQueue.main.sync {
+                    NSApp.activate(ignoringOtherApps: true)
+                    NSApp.yieldActivation(to: target)
+                    let ok = target.activate(from: NSRunningApplication.current, options: [])
+                    trace("#\(no) still not in front: activate Courier, then hand over -> \(ok)")
+                }
+            }
+        }
 
         DispatchQueue.global(qos: .userInitiated).async {
             func frontPid() -> pid_t { DispatchQueue.main.sync { NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0 } }
@@ -186,12 +213,13 @@ final class Sender {
                     NSApp.yieldActivation(to: target)
                     _ = target.activate(options: [.activateIgnoringOtherApps])
                 }
-                for _ in 0..<30 {
+                for k in 0..<30 {
                     usleep(50_000)
                     if frontPid() == pid {
                         usleep(150_000)
                         return true
                     }
+                    if k == 4 { push(0) } else if k == 12 { push(1) }
                 }
                 return false
             }
@@ -214,9 +242,11 @@ final class Sender {
             // Keys only once the target is really in front; else they land nowhere.
             let t0 = Date()
             var front = false
-            for _ in 0..<30 {
+            if !(ok1 || ok2) { push(0) }
+            for k in 0..<40 {
                 usleep(50_000)
                 if frontPid() == pid { front = true; break }
+                if k == 6 { push(0) } else if k == 14 { push(1) }
             }
             trace("#\(no) front=\(front) after \(Int(Date().timeIntervalSince(t0) * 1000))ms (\(frontName()))")
             guard front else { finish(.aborted("\(name) 没能切到前面")); return }
