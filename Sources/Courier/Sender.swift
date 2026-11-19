@@ -226,54 +226,60 @@ final class Sender {
             // the ms it took, nil if it never changed.
             func changed(from was: String?, limit: Int) -> Int? {
                 let t = Date()
-                while Int(Date().timeIntervalSince(t) * 1000) < limit {
-                    usleep(100_000)
+                while true {
                     if axValue(pid) != was { return Int(Date().timeIntervalSince(t) * 1000) }
+                    if Int(Date().timeIntervalSince(t) * 1000) >= limit { return nil }
+                    usleep(50_000)
+                }
+            }
+            // Types every part, then Return; the abort reason, or nil.
+            func typeAll() -> String? {
+                for (i, p) in parts.enumerated() {
+                    guard regain() else { return "发送中途切走后，\(name) 没能切回前面" }
+                    switch p {
+                    case .text(let s):
+                        last = DispatchQueue.main.sync { put(string: s) }
+                        postKey(keyV, .maskCommand)
+                        usleep(300_000)
+                        trace("#\(no) part \(i) text \(s.count) \"\(preview(s))\" ⌘V")
+                    case .image(let png):
+                        let was = axValue(pid)
+                        last = DispatchQueue.main.sync { put(png: png) }
+                        postKey(keyV, imageFlags)
+                        // Time to take the picture in (a terminal may send it on over
+                        // the network): on until the screen shows it, at least 0.5s.
+                        let limit = Int(1500 + Double(png.count) / 1_048_576 * 300)
+                        usleep(500_000)
+                        let took = axValue(pid) != was ? 0 : changed(from: was, limit: limit - 500)
+                        trace("#\(no) part \(i) image \(png.count / 1024)KB \(imageFlags == .maskControl ? "⌃V" : "⌘V") -> \(took.map { "shown after \(500 + $0)ms" } ?? (was == nil ? "unreadable, waited" : "no change"))")
+                    }
+                }
+                if !insertOnly {
+                    guard regain() else { return "回车前 \(name) 没能切回前面" }
+                    usleep(100_000)
+                    postKey(keyReturn, sendFlags)
+                    trace("#\(no) \(sendFlags == .maskCommand ? "⌘Return" : "Return")")
                 }
                 return nil
             }
-            for (i, p) in parts.enumerated() {
-                guard regain() else { finish(.aborted("发送中途切走后，\(name) 没能切回前面")); return }
-                switch p {
-                case .text(let s):
-                    // A paste that doesn't land (seen now and then in a terminal:
-                    // the app is in front, ⌘V goes out, nothing arrives) is pasted
-                    // once more; if the screen still doesn't change, stop with the
-                    // draft kept rather than press Return on nothing.
-                    let was = axValue(pid)
-                    let t = Date()
-                    last = DispatchQueue.main.sync { put(string: s) }
-                    postKey(keyV, .maskCommand)
-                    var took = changed(from: was, limit: 1500)
-                    trace("#\(no) part \(i) text \(s.count) \"\(preview(s))\" ⌘V -> \(took.map { "changed after \($0)ms" } ?? (was == nil ? "unreadable" : "no change")) \(axFocus(pid))")
-                    if took == nil, was != nil {
-                        guard regain() else { finish(.aborted("发送中途切走后，\(name) 没能切回前面")); return }
-                        trace("#\(no) part \(i) paste again, front=\(frontName()) window=\"\(preview(axWindowTitle(pid)))\"")
-                        last = DispatchQueue.main.sync { put(string: s) }
-                        postKey(keyV, .maskCommand)
-                        took = changed(from: was, limit: 1500)
-                        trace("#\(no) part \(i) retry -> \(took.map { "changed after \($0)ms" } ?? "no change")")
-                        guard took != nil else { finish(.aborted("内容没贴进 \(name)")); return }
-                    }
-                    let spent = Date().timeIntervalSince(t)
-                    if spent < 0.3 { usleep(useconds_t((0.3 - spent) * 1_000_000)) }
-                case .image(let png):
-                    last = DispatchQueue.main.sync { put(png: png) }
-                    postKey(keyV, imageFlags)
-                    // Time to take the picture in (a terminal may send it on over the network).
-                    usleep(useconds_t(1_500_000 + Double(png.count) / 1_048_576 * 300_000))
-                    trace("#\(no) part \(i) image \(png.count / 1024)KB \(imageFlags == .maskControl ? "⌃V" : "⌘V") -> \(axFocus(pid))")
+            // A send that doesn't land at all (seen now and then in a terminal:
+            // the app is in front, the keys go out, nothing arrives) leaves the
+            // screen as it was; then nothing happened, so it is safe to type it
+            // all once more. Still nothing: stop with the draft kept.
+            let start = axValue(pid)
+            for attempt in 0..<2 {
+                if attempt > 0 {
+                    guard regain() else { finish(.aborted("发送中途切走后，\(name) 没能切回前面")); return }
+                    trace("#\(no) nothing landed, again: front=\(frontName()) window=\"\(preview(axWindowTitle(pid)))\"")
                 }
-            }
-            if !insertOnly {
-                guard regain() else { finish(.aborted("回车前 \(name) 没能切回前面")); return }
-                usleep(100_000)
-                let was = axValue(pid)
-                postKey(keyReturn, sendFlags)
-                let took = changed(from: was, limit: 1000)
-                trace("#\(no) \(sendFlags == .maskCommand ? "⌘Return" : "Return") -> \(took.map { "changed after \($0)ms" } ?? (was == nil ? "unreadable" : "no change"))")
-            } else {
-                usleep(300_000)
+                if let why = typeAll() { finish(.aborted(why)); return }
+                guard start != nil else { usleep(300_000); break }
+                if let took = changed(from: start, limit: 1500) {
+                    trace("#\(no) landed (screen changed \(took)ms after the last key)")
+                    break
+                }
+                trace("#\(no) screen unchanged")
+                if attempt == 1 { finish(.aborted("内容没贴进 \(name)")); return }
             }
             finish(.sent(returnTo: wentTo))
         }
