@@ -1,46 +1,35 @@
-# InputBar
+# Courier
 
-A macOS input box for the terminal: press ⌃⌥⌘I anywhere, write in a native text field (your input method, normal editing), press Enter, and it is typed into the terminal in front in [Ghostty](https://ghostty.org).
+在 Mac 上的一个浮动输入框里写好要发的话，连同截图一起，发给当时在最前面的 App：终端里的 Claude Code、飞书、浏览器都行。
 
-按 ⌃⌥⌘I 随处呼出的输入框：在原生输入框里写（中文输入法、正常编辑），回车后送进 Ghostty 前台窗口当前的终端。适合给终端里的 AI 编程助手写长消息、贴截图。不管终端里跑的是 shell、Claude Code 还是经 SSH 的远程会话，都和你在终端里粘贴一样。
+它像输入法一样不挑 App：发送时把内容放上剪贴板，替你按 ⌘V（终端里贴图片用 ⌃V），最后按回车，然后把剪贴板还原。
 
-## 功能
+## 用法
 
-| 操作 | 效果 |
-|---|---|
-| ⌃⌥⌘I | 呼出 / 收起。框在你上次拖到的位置（按住顶部那条拖动），第一次在屏幕底部居中；配色跟系统浅色 / 深色 |
-| 回车 / ⌘回车 | 发送：按粘贴送入当前终端，再按 Enter。发出后框收起，原位置提示「已发送」 |
-| ⌥回车 | 只插入，不按 Enter，方便在终端里接着改 |
-| Shift+回车 | 换行；框随内容长高，最多 10 行，再多在框内滚动 |
-| ⌘V 剪贴板里只有图片 / 拖入图片 | 附图：光标处插入 `[图片N]` 标记，上方显示带编号的缩略图，点一下放大，去掉缩略图时标记一起删。发送按文字里的顺序进行：文字段按粘贴送入，图片逐张放进剪贴板给终端发 Ctrl+V（Claude Code 等程序按 Ctrl+V 贴图），每张等约 1.5 秒（大图更久）再接着发，已发的打勾，发完恢复原剪贴板。手动删掉标记的图片放在最后发 |
-| ⌘↑ / ⌘↓ | 翻最近 50 条发过的内容（只在内存里）；框里有草稿时不覆盖 |
-| ⌘K / 顶部垃圾桶 | 清空草稿，几秒内可以撤销 |
-| 图钉 | 钉住后发送、点别处都不收起，适合连续对话 |
-| Esc / 点别处 | 收起（大图打开时先收起大图），草稿保留 |
-| ⌘Q（框开着时） | 退出 |
+- 点一下要发往的窗口，再点 Courier 的输入框写字。顶部显示发往哪个 App。
+- Enter 发送，⇧Enter 换行，⌥Enter 只填入不回车。
+- ⌘V 贴截图，截图留在光标所在的位置，发送时文字和图片按顺序送出。
+- ⌘↑ / ⌘↓ 翻看发过的内容。
+- 点目标旁的锁，固定发往这个 App；⌘L 同。
+- × 或 ⌘W 收起，点 Dock 图标找回。草稿、截图、历史都存在本地，重启不丢。
 
-- 草稿按 Ghostty 终端分开保存（只在内存里）；发送前核对前台终端没变，变了就不发，框里提示并可重试。
-- 首次启动把自己加进登录项；没有菜单栏图标和 Dock 图标。
+## 权限
 
-## 依赖
-
-- macOS 14 及以上，Apple 芯片
-- Ghostty 1.4 及以上（用到它的 AppleScript 字典：`input text`、`send key`）
-- 第一次发送时 macOS 会问「InputBar 想控制 Ghostty」，点允许；拒绝过的话到 系统设置 › 隐私与安全性 › 自动化 打开
+要在「系统设置 › 隐私与安全性 › 辅助功能」里打开 Courier，它才能替你按键。
 
 ## 构建
 
-用 Go 1.27+ 和 [mygo](https://github.com/egoist/mygo)（纯 Go、无 cgo，可以在任何机器上交叉编译）。
+需要 Xcode（Swift 6）和 macOS 14 以上。
 
 ```sh
-scripts/build-app.sh                       # 在 Mac 上：编译、签名、装到 ~/Applications 并打开
-scripts/build-app.sh --package app.tgz     # 在别的机器上交叉编译打包，再到 Mac 上 scripts/install-app.sh app.tgz
+swift test
+scripts/build.sh --install
 ```
 
-默认临时签名，每次重新编译 macOS 都会把它当成新 App，「控制 Ghostty」要重新允许。想保持授权，设 `SIGN_IDENTITY` 用固定的签名证书（见脚本开头）。
+辅助功能权限跟签名绑定。默认是临时签名，每次构建签名都会变，权限要重新授。设置 `SIGN_IDENTITY` 用一个固定的签名身份，权限就能一直保留，见 `scripts/build.sh` 开头的说明。
 
-测试：`cd app && go test ./...`；`PREVIEW=<目录>` 时把输入框渲染成 PNG，在没有显示器的机器上也能看界面。
+日志在 `~/Library/Logs/Courier.log`，每次发送的每一步都有记录。
 
-## License
+## 许可
 
 MIT
