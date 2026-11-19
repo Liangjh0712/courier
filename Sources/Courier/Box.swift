@@ -12,6 +12,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private let lockBadge = NSImageView()
     private var clearButton: NSButton!
     private var fillButton: NSButton!
+    private var lockButton: NSButton!
     private let sendButton = SendButton()
     private let status = NSTextField(labelWithString: "")
     private var placing = false
@@ -571,6 +572,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
             chip.image = NSImage(systemSymbolName: "scope", accessibilityDescription: nil)
             chip.toolTip = "还没有发送目标：点一下要发往的窗口"
             lockBadge.isHidden = true
+            lockButton.isHidden = true
             editor.placeholder = "先点一下要发往的窗口，再回来写"
             return
         }
@@ -582,7 +584,11 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
             + "，发送用 " + (Prefs.sendFlags(app) == .maskCommand ? "⌘回车" : "回车")
         chip.toolTip = "发往 \(name)\(tracker.locked ? "（已锁定）" : "")。\(keys)。点击换目标、锁定、改按键"
         lockBadge.isHidden = !tracker.locked
-        editor.placeholder = "发往 \(name) · Enter 发送，⇧Enter 换行"
+        lockButton.isHidden = false
+        lockButton.image = NSImage(systemSymbolName: tracker.locked ? "lock.fill" : "lock.open", accessibilityDescription: nil)
+        lockButton.contentTintColor = tracker.locked ? .controlAccentColor : .tertiaryLabelColor
+        lockButton.toolTip = tracker.locked ? "已锁定发往 \(name)：点别的 App 也不会变。点击解锁（⌘L）" : "锁定发往 \(name)：之后点别的 App，目标也不变（⌘L）"
+        editor.placeholder = tracker.locked ? "锁定发往 \(name) · Enter 发送，⇧Enter 换行" : "发往 \(name) · Enter 发送，⇧Enter 换行"
     }
 
     private func build() {
@@ -690,12 +696,16 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         sendButton.onMenu = { [weak self] in self?.sendMenu() ?? NSMenu() }
         sendButton.isEnabled = false
 
-        let row = NSStackView(views: [chip, scroll, status, picture, history, clearButton, fold, fillButton, sendButton])
+        lockButton = iconButton("lock.open", "锁定发送目标（⌘L）", self, #selector(toggleLock))
+        lockButton.isHidden = true
+        let row = NSStackView(views: [chip, lockButton, scroll, status, picture, history, clearButton, fold, fillButton, sendButton])
         row.orientation = .horizontal
         row.alignment = .bottom
         row.spacing = 4
-        row.setCustomSpacing(8, after: chip)
-        row.setCustomSpacing(6, after: fillButton)
+        row.setCustomSpacing(2, after: chip)
+        row.setCustomSpacing(8, after: lockButton)
+        // A little apart, so a click meant for 只填入 does not send.
+        row.setCustomSpacing(12, after: fillButton)
         row.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(row)
         NSLayoutConstraint.activate([
