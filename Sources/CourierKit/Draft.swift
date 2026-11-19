@@ -26,12 +26,17 @@ public func trimmedEnd(_ s: String) -> String {
     s.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
 }
 
-/// The message cut at its picture markers, each picture where its marker is.
-/// A picture whose marker was deleted is not sent (deleting the marker is how
-/// a picture is taken out); a marker with no picture stays text; a second
-/// marker of the same picture stays text too.
-public func pieces(_ text: String, _ pics: [DraftImage]) -> [Piece] {
-    var out: [Piece] = []
+/// A run of the draft: text, or a picture where its marker is.
+public enum Segment: Equatable {
+    case text(String)
+    case picture(DraftImage)
+}
+
+/// The draft cut at its picture markers. A picture whose marker was deleted
+/// is left out (deleting the marker is how a picture is taken out); a marker
+/// with no picture stays text; a second marker of the same picture too.
+public func segments(_ text: String, _ pics: [DraftImage]) -> [Segment] {
+    var out: [Segment] = []
     var used = Set<Int>()
     let ns = text as NSString
     var last = 0
@@ -40,13 +45,23 @@ public func pieces(_ text: String, _ pics: [DraftImage]) -> [Piece] {
         guard !used.contains(id), let p = pics.first(where: { $0.id == id }) else { continue }
         let before = ns.substring(with: NSRange(location: last, length: m.range.location - last))
         if !before.isEmpty { out.append(.text(before)) }
-        out.append(.image(p.png))
+        out.append(.picture(p))
         used.insert(id)
         last = m.range.location + m.range.length
     }
     let rest = ns.substring(from: last)
     if !rest.isEmpty { out.append(.text(rest)) }
     return out
+}
+
+/// The draft as the steps of a send.
+public func pieces(_ text: String, _ pics: [DraftImage]) -> [Piece] {
+    segments(text, pics).map { s in
+        switch s {
+        case .text(let t): return .text(t)
+        case .picture(let p): return .image(p.png)
+        }
+    }
 }
 
 /// The pictures the text still refers to.

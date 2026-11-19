@@ -30,6 +30,32 @@ final class Editor: NSTextView {
     var onSubmit: ((_ insertOnly: Bool) -> Void)?
     var onImage: ((Data) -> Void)?
     var onRecall: ((_ step: Int) -> Void)?
+    var onClear: (() -> Void)?
+
+    /// Pictures dropped in go where they are dropped; text is taken as plain text.
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let pb = sender.draggingPasteboard
+        let at = characterIndexForInsertion(at: convert(sender.draggingLocation, from: nil))
+        var images: [Data] = []
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] {
+            images = urls.compactMap(pngOfImageFile)
+        }
+        if images.isEmpty, let png = pb.data(forType: .png) { images = [png] }
+        if images.isEmpty, let tiff = pb.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) { images = [png] }
+        if !images.isEmpty {
+            setSelectedRange(NSRange(location: at, length: 0))
+            for png in images { onImage?(png) }
+            trace("drop: \(images.count) picture(s)")
+            return true
+        }
+        if let s = pb.string(forType: .string) {
+            setSelectedRange(NSRange(location: at, length: 0))
+            insertText(s, replacementRange: selectedRange())
+            return true
+        }
+        return false
+    }
 
     override func paste(_ sender: Any?) {
         if let png = clipboardImage() {
@@ -53,6 +79,7 @@ final class Editor: NSTextView {
         case (.command, "z"): undoManager?.undo()
         case ([.command, .shift], "z"), ([.command, .shift], "Z"): undoManager?.redo()
         case (.command, "w"): window?.performClose(nil)
+        case (.command, "k"): onClear?()
         case (.command, "q"): NSApp.terminate(nil)
         default:
             if mods.contains(.command) && (e.keyCode == 126 || e.keyCode == 125) {

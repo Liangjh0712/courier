@@ -16,6 +16,13 @@ final class TargetTracker {
     }
     private var skipped: pid_t = 0
 
+    /// Picked by hand: goes there until unlocked.
+    func pin(_ a: NSRunningApplication) {
+        app = a
+        trace("pinned \(a.localizedName ?? "?")")
+        locked = true
+    }
+
     func start() {
         let timer = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in self?.follow() }
         RunLoop.main.add(timer, forMode: .common)

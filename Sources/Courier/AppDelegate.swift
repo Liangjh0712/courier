@@ -2,10 +2,13 @@ import AppKit
 import CourierKit
 import ServiceManagement
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) { refreshMenu() }
+
     let box = Box()
     private var loginItem: NSMenuItem!
     private var keyboardItem: NSMenuItem!
+    private var bubbleItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let version = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
@@ -44,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshMenu() {
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
         keyboardItem.state = box.takeKeyboardAfterSend ? .on : .off
+        bubbleItem.state = Prefs.bubble ? .on : .off
     }
 
     @objc private func toggleLogin(_ item: NSMenuItem) {
@@ -55,6 +59,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         box.takeKeyboardAfterSend.toggle()
         refreshMenu()
     }
+
+    @objc private func toggleBubble(_ item: NSMenuItem) {
+        Prefs.bubble.toggle()
+        if !Prefs.bubble { box.bubble.hide() } else if !box.panel.isVisible { box.bubble.show() }
+        refreshMenu()
+    }
+
+    @objc private func clear(_ item: NSMenuItem) { box.clear() }
 
     @objc private func openLog(_ item: NSMenuItem) {
         NSWorkspace.shared.open(Paths.log)
@@ -80,10 +92,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         app.addItem(loginItem)
         keyboardItem = item("发送后输入框接管键盘", #selector(toggleKeyboard(_:)), target: self)
         app.addItem(keyboardItem)
+        bubbleItem = item("收起时显示悬浮球", #selector(toggleBubble(_:)), target: self)
+        app.addItem(bubbleItem)
         app.addItem(item("打开日志", #selector(openLog(_:)), target: self))
         app.addItem(.separator())
         app.addItem(item("隐藏 Courier", #selector(NSApplication.hide(_:)), "h"))
         app.addItem(item("退出 Courier", #selector(NSApplication.terminate(_:)), "q"))
+        app.delegate = self
         let appItem = NSMenuItem()
         appItem.submenu = app
         main.addItem(appItem)
@@ -96,6 +111,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         edit.addItem(item("复制", #selector(NSText.copy(_:)), "c"))
         edit.addItem(item("粘贴", #selector(NSText.paste(_:)), "v"))
         edit.addItem(item("全选", #selector(NSText.selectAll(_:)), "a"))
+        edit.addItem(.separator())
+        edit.addItem(item("清空草稿", #selector(clear(_:)), "k", target: self))
         let editItem = NSMenuItem()
         editItem.submenu = edit
         main.addItem(editItem)

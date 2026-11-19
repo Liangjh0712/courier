@@ -120,7 +120,8 @@ func axFocus(_ pid: pid_t) -> String {
 }
 
 enum SendOutcome {
-    case sent
+    /// returnTo: the app you switched to while it was sending, to go back to.
+    case sent(returnTo: NSRunningApplication?)
     case aborted(String)
 }
 
@@ -134,7 +135,8 @@ final class Sender {
         let no = count
         let pid = target.processIdentifier
         let name = target.localizedName ?? "?"
-        let imageFlags: CGEventFlags = isTerminal(target) ? .maskControl : .maskCommand
+        let imageFlags = Prefs.imageFlags(target)
+        let sendFlags = Prefs.sendFlags(target)
         let snap = ClipboardSnapshot.capture()
         NSApp.yieldActivation(to: target)
         let ok1 = target.activate(from: NSRunningApplication.current, options: [])
@@ -145,6 +147,28 @@ final class Sender {
             func frontPid() -> pid_t { DispatchQueue.main.sync { NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0 } }
             func frontName() -> String { DispatchQueue.main.sync { NSWorkspace.shared.frontmostApplication?.localizedName ?? "-" } }
             var last = -1
+            // Switched away mid-send: the send still goes to the target (the
+            // target is taken back to the front), and afterwards you are put
+            // back where you went.
+            var wentTo: NSRunningApplication?
+            func regain() -> Bool {
+                if frontPid() == pid { return true }
+                let other = DispatchQueue.main.sync { NSWorkspace.shared.frontmostApplication }
+                if wentTo == nil, let o = other, o.processIdentifier != getpid() { wentTo = o }
+                trace("#\(no) front moved to \(other?.localizedName ?? "-") mid-send: taking \(name) back")
+                DispatchQueue.main.sync {
+                    NSApp.yieldActivation(to: target)
+                    _ = target.activate(options: [.activateIgnoringOtherApps])
+                }
+                for _ in 0..<30 {
+                    usleep(50_000)
+                    if frontPid() == pid {
+                        usleep(150_000)
+                        return true
+                    }
+                }
+                return false
+            }
             func finish(_ outcome: SendOutcome) {
                 DispatchQueue.main.async {
                     let cc = NSPasteboard.general.changeCount
@@ -173,8 +197,7 @@ final class Sender {
             usleep(150_000)
             trace("#\(no) before: \(axFocus(pid))")
             for (i, p) in parts.enumerated() {
-                // Someone clicked elsewhere mid-way: stop rather than type into it.
-                guard frontPid() == pid else { finish(.aborted("发送中途前台变成了 \(frontName())")); return }
+                guard regain() else { finish(.aborted("发送中途切走后，\(name) 没能切回前面")); return }
                 switch p {
                 case .text(let s):
                     last = DispatchQueue.main.sync { put(string: s) }
@@ -190,13 +213,13 @@ final class Sender {
                 }
             }
             if !insertOnly {
-                guard frontPid() == pid else { finish(.aborted("回车前前台变成了 \(frontName())")); return }
+                guard regain() else { finish(.aborted("回车前 \(name) 没能切回前面")); return }
                 usleep(100_000)
-                postKey(keyReturn)
-                trace("#\(no) return")
+                postKey(keyReturn, sendFlags)
+                trace("#\(no) \(sendFlags == .maskCommand ? "⌘Return" : "Return")")
             }
             usleep(300_000)
-            finish(.sent)
+            finish(.sent(returnTo: wentTo))
         }
     }
 }
