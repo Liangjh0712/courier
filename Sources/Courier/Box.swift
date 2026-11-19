@@ -69,7 +69,19 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     func start() {
         build()
         load()
-        tracker.onChange = { [weak self] in self?.renderTarget() }
+        tracker.onChange = { [weak self] in
+            self?.renderTarget()
+            self?.checkDesktop()
+        }
+        // Locked on an app: the box shows only on the desktop where that app is.
+        let ws = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.didActivateApplicationNotification,
+                     NSWorkspace.didHideApplicationNotification, NSWorkspace.didUnhideApplicationNotification] {
+            ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                // The window list catches up a moment after a desktop switch.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self?.checkDesktop() }
+            }
+        }
         tracker.start()
         bubble.onClick = { [weak self] in self?.showBox() }
         bubble.onMoved = { [weak self] o in self?.origin = o }
@@ -191,6 +203,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     // MARK: actions
 
     func showBox() {
+        away = nil
         if bubble.isVisible {
             origin = bubble.origin
             bubble.hide()
@@ -201,6 +214,38 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(editor)
         if wasHidden { fade() }
+    }
+
+    /// Put out of sight because the locked app has no window on this desktop:
+    /// what was showing then (the box, the bubble), to bring back.
+    private var away: (box: Bool, bubble: Bool)?
+
+    private func checkDesktop() {
+        guard !busy, panel != nil else { return }
+        let here: Bool
+        if tracker.locked, let app = tracker.app, !app.isTerminated {
+            here = !app.isHidden && topWindowLayer(app.processIdentifier) != nil
+        } else {
+            here = true
+        }
+        if !here, away == nil {
+            let was = (box: panel.isVisible, bubble: bubble.isVisible)
+            guard was.box || was.bubble else { return }
+            away = was
+            trace("away: \(tracker.app?.localizedName ?? "-") not on this desktop")
+            panel.orderOut(nil)
+            bubble.hide()
+        } else if here, let was = away {
+            away = nil
+            trace("back: \(tracker.app?.localizedName ?? "-") on this desktop")
+            if was.bubble {
+                bubble.show(at: bubble.origin)
+            } else if was.box {
+                panel.alphaValue = 0
+                panel.orderFrontRegardless()
+                fade()
+            }
+        }
     }
 
     /// Puts the box away: it shrinks into the bubble, which takes its place.

@@ -11,6 +11,8 @@ final class TargetTracker {
     var locked = false {
         didSet {
             trace("lock=\(locked) target=\(app?.localizedName ?? "-")")
+            // Kept across restarts.
+            UserDefaults.standard.set(locked ? app?.bundleIdentifier : nil, forKey: "lockedApp")
             onChange?()
         }
     }
@@ -24,6 +26,12 @@ final class TargetTracker {
     }
 
     func start() {
+        if let id = UserDefaults.standard.string(forKey: "lockedApp"),
+           let a = NSRunningApplication.runningApplications(withBundleIdentifier: id).first {
+            app = a
+            trace("restored lock on \(a.localizedName ?? id)")
+            locked = true
+        }
         let timer = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in self?.follow() }
         RunLoop.main.add(timer, forMode: .common)
         follow()
