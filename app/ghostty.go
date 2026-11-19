@@ -46,8 +46,9 @@ const probeScript = `on run argv
 	end tell
 end run`
 
-// sendScript: argv is the terminal ID expected, then "image", or "text" and
-// the text. It refuses when the focused terminal is no longer that one.
+// sendScript: argv is the terminal ID expected, then "image", or "text" or
+// "insert" and the text ("insert" leaves out the Enter). It refuses when the
+// focused terminal is no longer that one.
 const sendScript = `on run argv
 	set expected to item 1 of argv
 	set what to item 2 of argv
@@ -61,8 +62,10 @@ const sendScript = `on run argv
 		else
 			set msg to item 3 of argv
 			if msg is not "" then input text msg to t
-			delay 0.15
-			send key "enter" to t
+			if what is "text" then
+				delay 0.15
+				send key "enter" to t
+			end if
 		end if
 	end tell
 end run`
@@ -111,9 +114,10 @@ func probe() (target, error) {
 	return target{ID: id, Title: title}, nil
 }
 
-// deliver types the pictures and the text into terminal id, then Enter.
-// Pictures are PNG; the clipboard is restored after the last one.
-func deliver(id, text string, pictures [][]byte) error {
+// deliver types the pictures and the text into terminal id, then Enter
+// unless insert. Pictures are PNG; done is called after each one, and the
+// clipboard is restored after the last.
+func deliver(id, text string, pictures [][]byte, insert bool, done func(n int)) error {
 	if len(pictures) > 0 {
 		saved, rerr := mygo.Clipboard.Read()
 		defer func() {
@@ -121,7 +125,7 @@ func deliver(id, text string, pictures [][]byte) error {
 				_ = mygo.Clipboard.Write(saved)
 			}
 		}()
-		for _, p := range pictures {
+		for i, p := range pictures {
 			if err := mygo.Clipboard.Write(transfer.New(transfer.NewItem(transfer.Bytes(transfer.PNG, p)))); err != nil {
 				return errors.New("图片放不进剪贴板：" + err.Error())
 			}
@@ -129,9 +133,14 @@ func deliver(id, text string, pictures [][]byte) error {
 				return err
 			}
 			time.Sleep(imageSettle)
+			done(i + 1)
 		}
 	}
-	_, err := osascript(sendScript, id, "text", text)
+	mode := "text"
+	if insert {
+		mode = "insert"
+	}
+	_, err := osascript(sendScript, id, mode, text)
 	return err
 }
 

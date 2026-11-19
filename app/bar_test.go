@@ -9,7 +9,9 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 )
@@ -85,7 +87,7 @@ func TestSend(t *testing.T) {
 	main := make(chan func(), 1)
 	b.update = func(fn func()) { main <- fn }
 	var got []string
-	b.deliver = func(id, text string, pics [][]byte) error {
+	b.deliver = func(id, text string, pics [][]byte, insert bool, done func(int)) error {
 		got = append(got, id+"|"+text)
 		if text == "fail" {
 			return errors.New("Ghostty 当前的终端变了，没有发送")
@@ -93,19 +95,19 @@ func TestSend(t *testing.T) {
 		return nil
 	}
 	b.text = "没有终端"
-	b.Send()
+	b.Send(false)
 	if !b.bad || b.busy {
 		t.Fatal("no terminal: refused")
 	}
 	b.setTarget(target{ID: "A"}, nil)
 	b.text = "第一行\n第二行\n"
-	b.Send()
+	b.Send(false)
 	(<-main)()
 	if b.busy || b.text != "" || got[0] != "A|第一行\n第二行" {
 		t.Fatalf("%q %q", b.text, got)
 	}
 	b.text = "fail"
-	b.Send()
+	b.Send(false)
 	(<-main)()
 	if b.text != "fail" || !b.bad {
 		t.Fatalf("failure keeps the text: %q %v", b.text, b.status)
@@ -131,33 +133,121 @@ func TestAsPNG(t *testing.T) {
 	}
 }
 
+func TestHistory(t *testing.T) {
+	b := testBar()
+	for _, s := range []string{"一", "二", "三", "二"} {
+		b.remember(s)
+	}
+	if got := strings.Join(b.history, ","); got != "一,三,二" {
+		t.Fatalf("no repeats, latest last: %s", got)
+	}
+	b.hist = len(b.history)
+	b.Recall(-1)
+	b.Recall(-1)
+	if b.text != "三" {
+		t.Fatalf("two back: %q", b.text)
+	}
+	b.Recall(+1)
+	b.Recall(+1)
+	if b.text != "" {
+		t.Fatalf("past the newest the (empty) draft comes back: %q", b.text)
+	}
+	b.text = "正在写"
+	b.Recall(-1)
+	if b.text != "正在写" {
+		t.Fatalf("a draft is never replaced: %q", b.text)
+	}
+}
+
+func TestClearUndo(t *testing.T) {
+	b := testBar()
+	b.text = "草稿"
+	b.pics = []picture{{}}
+	b.Clear()
+	if b.text != "" || len(b.pics) != 0 || !b.canUndo() {
+		t.Fatalf("cleared: %+v", b)
+	}
+	b.Undo()
+	if b.text != "草稿" || len(b.pics) != 1 || b.cleared != nil {
+		t.Fatalf("undone: %+v", b)
+	}
+	b.Clear()
+	b.text = "新写的"
+	b.Undo()
+	if b.text != "新写的" {
+		t.Fatal("undo must not replace what was written after the clear")
+	}
+}
+
 func TestPreview(t *testing.T) {
 	var shot bytes.Buffer
-	_ = png.Encode(&shot, image.NewRGBA(image.Rect(0, 0, 40, 40)))
-	for name, setup := range map[string]func(b *bar){
-		"empty": func(b *bar) {},
-		"draft": func(b *bar) {
-			b.text = "这个报错帮我看一下\n第二行：顺便把截图里的日志也过一遍"
-			b.attach(shot.Bytes())
-			b.attach(shot.Bytes())
-		},
-		"error": func(b *bar) {
-			b.text = "hello"
-			b.terr = "没有控制 Ghostty 的权限：系统设置 → 隐私与安全性 → 自动化，打开 InputBar 下的 Ghostty"
-			b.target = target{}
-		},
-	} {
-		b := testBar()
-		b.target = target{ID: "A", Title: "devbox: ~/project"}
-		setup(b)
-		img := ui.Render(b.view, barWidth, barHeight, 2)
-		if dir := os.Getenv("PREVIEW"); dir != "" {
-			f, err := os.Create(filepath.Join(dir, "inputbar-"+name+".png"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			_ = png.Encode(f, img)
-			f.Close()
+	img := image.NewRGBA(image.Rect(0, 0, 320, 200))
+	for y := 0; y < 200; y++ {
+		for x := 0; x < 320; x++ {
+			img.Set(x, y, color.RGBA{uint8(40 + x/3), uint8(60 + y/2), 140, 255})
 		}
 	}
+	_ = png.Encode(&shot, img)
+	long := "这个报错帮我看一下，是不是 herdr 远程客户端的问题？\n第二行：顺便把截图里的日志也过一遍\n第三行：看完给个结论就行"
+	states := []struct {
+		name   string
+		height int
+		setup  func(b *bar)
+	}{
+		{"empty", 92, func(b *bar) {}},
+		{"draft", 200, func(b *bar) {
+			b.text = long
+			b.attach(shot.Bytes())
+			b.attach(shot.Bytes())
+		}},
+		{"sending", 200, func(b *bar) {
+			b.text = long
+			b.attach(shot.Bytes())
+			b.attach(shot.Bytes())
+			b.attach(shot.Bytes())
+			b.busy, b.sent = true, 1
+		}},
+		{"preview", 420, func(b *bar) {
+			b.text = "看这张"
+			b.attach(shot.Bytes())
+			b.attach(shot.Bytes())
+			b.preview = 0
+		}},
+		{"error", 136, func(b *bar) {
+			b.text = "hello"
+			b.status, b.bad, b.retry = "没发出去：Ghostty 当前的终端变了，没有发送", true, true
+		}},
+		{"cleared", 92, func(b *bar) {
+			b.text = "x"
+			b.Clear()
+		}},
+		{"pinned", 92, func(b *bar) {
+			b.pinned = true
+			b.flash = time.Now().Add(time.Hour)
+		}},
+	}
+	for _, s := range states {
+		for _, dark := range []bool{false, true} {
+			b := testBar()
+			b.target = target{ID: "A", Title: "devbox: ~/project"}
+			s.setup(b)
+			name := s.name
+			view := b.view
+			if dark {
+				name += "-dark"
+				view = func(c *ui.Context) { c.SetTheme(ui.DarkTheme()); b.view(c) }
+			}
+			out := ui.Render(view, barWidth, s.height, 2)
+			if dir := os.Getenv("PREVIEW"); dir != "" {
+				f, err := os.Create(filepath.Join(dir, "bar-"+name+".png"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = png.Encode(f, out)
+				f.Close()
+			}
+		}
+	}
+	tb := testBar()
+	_ = ui.Render(tb.toastView, 150, 40, 2)
 }

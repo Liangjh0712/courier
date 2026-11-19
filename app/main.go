@@ -53,6 +53,10 @@ func appMenu(b *bar) *mygo.Menu {
 				}
 			}},
 			{Role: mygo.RoleSelectAll},
+			mygo.Separator(),
+			// ⌘↑ ⌘↓ walk through what was sent; the text area takes the bare arrows.
+			{Label: "上一条", Accelerator: "CmdOrCtrl+Up", Click: func(*mygo.MenuItem, *mygo.Window) { b.recallKey(-1) }},
+			{Label: "下一条", Accelerator: "CmdOrCtrl+Down", Click: func(*mygo.MenuItem, *mygo.Window) { b.recallKey(+1) }},
 		}},
 	})
 }
