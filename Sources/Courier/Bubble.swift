@@ -6,7 +6,6 @@ import CourierKit
 /// opens the box from here. Dragged, it takes the box's place with it.
 final class Bubble: NSObject {
     static let size: CGFloat = 44
-    static let idleAlpha: CGFloat = 0.35
 
     var onClick: (() -> Void)?
     var onMoved: ((NSPoint) -> Void)?
@@ -56,16 +55,18 @@ final class Bubble: NSObject {
         panel.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.15
-            panel.animator().alphaValue = Bubble.idleAlpha
+            panel.animator().alphaValue = Prefs.idleAlpha
         }
     }
 
     func hide() { panel?.orderOut(nil) }
 
+    func refreshAlpha() { if isVisible { panel.alphaValue = Prefs.idleAlpha } }
+
     fileprivate func hover(_ inside: Bool) {
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = inside ? 0.12 : 0.3
-            panel.animator().alphaValue = inside ? 1 : Bubble.idleAlpha
+            panel.animator().alphaValue = inside ? Prefs.activeAlpha : Prefs.idleAlpha
         }
     }
 

@@ -25,6 +25,18 @@ enum Prefs {
         d.set(f == .maskCommand ? "cmd" : "return", forKey: "sendKey." + (app.bundleIdentifier ?? "-"))
     }
 
+    /// How opaque the box is while in use (written in, pointed at, sending),
+    /// and while not: both set by the user.
+    static var activeAlpha: CGFloat {
+        get { d.object(forKey: "activeAlpha") as? CGFloat ?? 1 }
+        set { d.set(newValue, forKey: "activeAlpha") }
+    }
+
+    static var idleAlpha: CGFloat {
+        get { d.object(forKey: "idleAlpha") as? CGFloat ?? 0.35 }
+        set { d.set(newValue, forKey: "idleAlpha") }
+    }
+
     static var bubble: Bool {
         get { d.object(forKey: "bubble") as? Bool ?? true }
         set { d.set(newValue, forKey: "bubble") }

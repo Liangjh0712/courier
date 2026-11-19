@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var loginItem: NSMenuItem!
     private var keyboardItem: NSMenuItem!
     private var bubbleItem: NSMenuItem!
+    private var alphaItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let version = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
@@ -48,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
         keyboardItem.state = box.takeKeyboardAfterSend ? .on : .off
         bubbleItem.state = Prefs.bubble ? .on : .off
+        alphaItem.submenu = box.opacityMenu()
     }
 
     @objc private func toggleLogin(_ item: NSMenuItem) {
@@ -96,6 +98,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         app.addItem(keyboardItem)
         bubbleItem = item("收起时显示悬浮球", #selector(toggleBubble(_:)), target: self)
         app.addItem(bubbleItem)
+        alphaItem = NSMenuItem(title: "透明度", action: nil, keyEquivalent: "")
+        app.addItem(alphaItem)
         app.addItem(item("打开日志", #selector(openLog(_:)), target: self))
         app.addItem(.separator())
         app.addItem(item("隐藏 Courier", #selector(NSApplication.hide(_:)), "h"))

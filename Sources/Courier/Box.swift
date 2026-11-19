@@ -37,7 +37,6 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     /// How much of the box shows while it is not in use (the keyboard is
     /// elsewhere and the mouse is not over it).
-    static let idleAlpha: CGFloat = 0.35
     /// One line high by default, as high as the bubble, so the bubble is its
     /// left end; drag the edges to make it bigger, the text wraps and scrolls.
     static let lineHeight: CGFloat = 44
@@ -216,6 +215,36 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         if wasHidden { fade() }
     }
 
+    /// Opacity in use and idle, to pick from (app menu and target menu).
+    func opacityMenu() -> NSMenu {
+        let m = NSMenu(title: "透明度")
+        for (title, active, values) in [("使用时（在写、鼠标在上面、发送中）", true, [1, 0.9, 0.8, 0.7, 0.6]),
+                                        ("不用时", false, [0.15, 0.25, 0.35, 0.5, 0.7, 1])] as [(String, Bool, [CGFloat])] {
+            if !m.items.isEmpty { m.addItem(.separator()) }
+            let head = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            head.isEnabled = false
+            m.addItem(head)
+            let now = active ? Prefs.activeAlpha : Prefs.idleAlpha
+            for v in values {
+                let i = NSMenuItem(title: v == 1 ? "不透明" : "\(Int(v * 100))%", action: #selector(setAlpha(_:)), keyEquivalent: "")
+                i.target = self
+                i.representedObject = [active ? 1 : 0, v] as [CGFloat]
+                i.indentationLevel = 1
+                i.state = abs(now - v) < 0.001 ? .on : .off
+                m.addItem(i)
+            }
+        }
+        return m
+    }
+
+    @objc private func setAlpha(_ item: NSMenuItem) {
+        guard let p = item.representedObject as? [CGFloat], p.count == 2 else { return }
+        if p[0] == 1 { Prefs.activeAlpha = p[1] } else { Prefs.idleAlpha = p[1] }
+        trace("opacity \(p[0] == 1 ? "in use" : "idle") = \(Int(p[1] * 100))%")
+        fade()
+        bubble.refreshAlpha()
+    }
+
     /// Put out of sight because the locked app has no window on this desktop:
     /// what was showing then (the box, the bubble), to bring back.
     private var away: (box: Bool, bubble: Bool)?
@@ -309,7 +338,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     /// Out of the way while not in use: faint until written in or pointed at.
     private func fade() {
-        let want: CGFloat = panel.isKeyWindow || hovering || busy ? 1 : Box.idleAlpha
+        let want: CGFloat = panel.isKeyWindow || hovering || busy ? Prefs.activeAlpha : Prefs.idleAlpha
         guard panel.alphaValue != want else { return }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = want == 1 ? 0.12 : 0.35
@@ -583,6 +612,10 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
             sndItem.submenu = snd
             menu.addItem(sndItem)
         }
+        menu.addItem(.separator())
+        let alpha = NSMenuItem(title: "透明度", action: nil, keyEquivalent: "")
+        alpha.submenu = opacityMenu()
+        menu.addItem(alpha)
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
     }
 
