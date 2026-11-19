@@ -8,6 +8,12 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     private var card: CardView!
     private var editor: Editor!
     private var scroll: NSScrollView!
+    /// The text's place in the row while one line high; taller, the text
+    /// moves up over the whole width and the row stays below as a toolbar.
+    private let slot = NSView()
+    private var oneLine: [NSLayoutConstraint] = []
+    private var tallLayout: [NSLayoutConstraint] = []
+    private var tall: Bool?
     private let chip = NSButton()
     private let lockBadge = NSImageView()
     private var clearButton: NSButton!
@@ -36,6 +42,8 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     /// left end; drag the edges to make it bigger, the text wraps and scrolls.
     static let lineHeight: CGFloat = 44
     static let pad: CGFloat = 8
+    /// From this height on: text above, buttons in a row below.
+    static let tallFrom: CGFloat = 72
 
     /// One place for both: the box's bottom-left corner, which is where the
     /// bubble sits when the box is put away.
@@ -269,6 +277,11 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         let h = panel.frame.height
         card.radius = h <= 46 ? h / 2 : 18
         panel.invalidateShadow()
+        let want = h >= Box.tallFrom
+        guard want != tall else { return }
+        tall = want
+        NSLayoutConstraint.deactivate(want ? oneLine : tallLayout)
+        NSLayoutConstraint.activate(want ? tallLayout : oneLine)
     }
 
     @objc func toggleLock() {
@@ -698,9 +711,12 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
         lockButton = iconButton("lock.open", "锁定发送目标（⌘L）", self, #selector(toggleLock))
         lockButton.isHidden = true
-        let row = NSStackView(views: [chip, lockButton, scroll, status, picture, history, clearButton, fold, fillButton, sendButton])
+        slot.translatesAutoresizingMaskIntoConstraints = false
+        slot.setContentHuggingPriority(.init(1), for: .horizontal)
+        slot.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        let row = NSStackView(views: [chip, lockButton, slot, status, picture, history, clearButton, fold, fillButton, sendButton])
         row.orientation = .horizontal
-        row.alignment = .bottom
+        row.alignment = .centerY
         row.spacing = 4
         row.setCustomSpacing(2, after: chip)
         row.setCustomSpacing(8, after: lockButton)
@@ -708,13 +724,28 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         row.setCustomSpacing(12, after: fillButton)
         row.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(row)
+        // The text is not in the row but laid over it, so switching layouts
+        // moves it without taking the keyboard focus away.
+        card.addSubview(scroll)
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Box.pad),
             row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Box.pad),
-            row.topAnchor.constraint(equalTo: card.topAnchor, constant: Box.pad),
             row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -Box.pad),
-            scroll.heightAnchor.constraint(equalTo: row.heightAnchor),
+            row.heightAnchor.constraint(equalToConstant: 28),
+            slot.heightAnchor.constraint(equalToConstant: 28),
         ])
+        oneLine = [
+            scroll.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: card.topAnchor, constant: Box.pad),
+            scroll.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -Box.pad),
+        ]
+        tallLayout = [
+            scroll.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 10),
+            scroll.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -10),
+            scroll.topAnchor.constraint(equalTo: card.topAnchor, constant: 10),
+            scroll.bottomAnchor.constraint(equalTo: row.topAnchor, constant: -4),
+        ]
         panel.minSize = NSSize(width: 320, height: Box.lineHeight)
         panel.maxSize = NSSize(width: 2400, height: 1600)
         scroll.setContentHuggingPriority(.defaultLow, for: .horizontal)
