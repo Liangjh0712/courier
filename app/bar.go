@@ -7,13 +7,16 @@ package main
 // is written, up to ten lines. Enter sends, Shift+Enter starts a new line,
 // ⌥Enter only types the text in (no Enter); ⌘↑ and ⌘↓ walk through what was
 // sent before; ⌘K clears the draft (撤销 brings it back for a few seconds). ⌘V of a picture or a picture dropped on the box attaches it.
-// Each Ghostty terminal keeps its own draft; what runs inside a terminal (a
+// A picture sits in the text as "[图片N]" where it was pasted, and the
+// message goes in that order. Each Ghostty terminal keeps its own draft; what runs inside a terminal (a
 // multiplexer's tabs, say) is not known here.
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,9 +37,51 @@ const (
 	undoFor      = 6 * time.Second
 )
 
+// picture is an attachment. It sits in the text as its marker, "[图片N]"
+// with N its ID, where it was pasted: the message is sent in that order.
 type picture struct {
+	ID    int
 	PNG   []byte
 	Thumb *ui.Bitmap
+}
+
+func marker(id int) string { return fmt.Sprintf("[图片%d]", id) }
+
+var markerRE = regexp.MustCompile(`\[图片(\d+)\]`)
+
+// pieces splits the text at the markers of its pictures, in order; pictures
+// whose marker was deleted from the text go last, so none is lost. A marker
+// without its picture stays text.
+func pieces(text string, pics []picture) []segment {
+	byID := map[int][]byte{}
+	for _, p := range pics {
+		byID[p.ID] = p.PNG
+	}
+	var out []segment
+	used := map[int]bool{}
+	last := 0
+	for _, m := range markerRE.FindAllStringSubmatchIndex(text, -1) {
+		id, _ := strconv.Atoi(text[m[2]:m[3]])
+		png, ok := byID[id]
+		if !ok || used[id] {
+			continue
+		}
+		if m[0] > last {
+			out = append(out, segment{Text: text[last:m[0]]})
+		}
+		out = append(out, segment{Picture: png})
+		used[id] = true
+		last = m[1]
+	}
+	if last < len(text) {
+		out = append(out, segment{Text: text[last:]})
+	}
+	for _, p := range pics {
+		if !used[p.ID] {
+			out = append(out, segment{Picture: p.PNG})
+		}
+	}
+	return out
 }
 
 type draft struct {
@@ -67,13 +112,15 @@ type bar struct {
 	pinned   bool      // stays up after sending and when clicked away from
 	preview  int       // the picture shown large, -1 for none
 	height   int       // the window height last set
+	sel      [2]int    // the text area's selection last frame, in runes
+	caret    int       // put the caret here next frame (runes), -1 for no move
 	cleared  *draft    // what ⌘K cleared, for 撤销
 	undoBy   time.Time // 撤销 is offered until then
 	quitting bool
 	// probe and deliver reach Ghostty, update runs on the main thread (the
 	// window's Update); tests replace them.
 	probe   func() (target, error)
-	deliver func(id, text string, pictures [][]byte, insert bool, done func(int)) error
+	deliver func(id string, pieces []segment, insert bool, done func(int)) error
 	update  func(func())
 }
 
@@ -86,7 +133,7 @@ func configDir() string {
 }
 
 func newBar() *bar {
-	return &bar{drafts: map[string]*draft{}, probe: probe, deliver: deliver, preview: -1}
+	return &bar{drafts: map[string]*draft{}, probe: probe, deliver: deliver, preview: -1, caret: -1}
 }
 
 func (b *bar) create() {
@@ -199,15 +246,12 @@ func (b *bar) Send(insert bool) {
 		b.status, b.bad, b.retry = "还不知道发给哪个终端："+b.terr, true, false
 		return
 	}
-	pics := make([][]byte, len(b.pics))
-	for i, p := range b.pics {
-		pics[i] = p.PNG
-	}
+	parts := pieces(strings.ReplaceAll(text, "\r\n", "\n"), b.pics)
 	b.busy, b.bad, b.retry, b.sent, b.preview = true, false, false, 0, -1
 	b.status = "发送中…"
 	id, sentText, sentPics := b.target.ID, b.text, len(b.pics)
 	go func() {
-		err := b.deliver(id, strings.ReplaceAll(text, "\r\n", "\n"), pics, insert, func(n int) {
+		err := b.deliver(id, parts, insert, func(n int) {
 			b.update(func() { b.sent = n })
 		})
 		b.update(func() {
@@ -217,8 +261,8 @@ func (b *bar) Send(insert bool) {
 				return
 			}
 			b.status, b.bad = "", false
-			if text != "" {
-				b.remember(text)
+			if plain := strings.TrimSpace(markerRE.ReplaceAllString(text, "")); plain != "" {
+				b.remember(plain)
 			}
 			if b.target.ID == id && b.text == sentText {
 				b.text, b.prev = "", ""
@@ -354,7 +398,20 @@ func (b *bar) attach(data []byte) {
 		return
 	}
 	thumb, _ := ui.DecodeBitmap(p)
-	b.pics = append(b.pics, picture{PNG: p, Thumb: thumb})
+	id := 1
+	for _, q := range b.pics {
+		id = max(id, q.ID+1)
+	}
+	b.pics = append(b.pics, picture{ID: id, PNG: p, Thumb: thumb})
+	// The marker goes where the caret is (over a selection), so text written
+	// before and after the picture keeps its place around it.
+	runes := []rune(b.text)
+	start, end := min(b.sel[0], b.sel[1], len(runes)), min(max(b.sel[0], b.sel[1]), len(runes))
+	m := marker(id)
+	b.text = string(runes[:start]) + m + string(runes[end:])
+	b.prev = b.text
+	b.caret = start + len([]rune(m))
+	b.sel = [2]int{b.caret, b.caret}
 	if !b.retry {
 		b.status, b.bad = "", false
 	}
@@ -543,6 +600,13 @@ func (b *bar) editor(c *ui.Context, dragging bool) {
 			b.focus = false
 			area.Focus()
 		}
+		if b.caret >= 0 {
+			area.SetTextSelection(b.caret, b.caret)
+			b.caret = -1
+		}
+		if s, e := area.TextSelection(); area.Focused() {
+			b.sel = [2]int{s, e}
+		}
 		if area.Changed() {
 			if before, ok := enterTyped(b.prev, b.text); ok && !shiftHeld() {
 				b.text = before
@@ -594,7 +658,7 @@ func (b *bar) thumbs(c *ui.Context) {
 	ui.Row(c).Gap(8).PaddingX(2).Children(func() {
 		for i, p := range b.pics {
 			c := c.Key(i)
-			cell := ui.ButtonBase(c).Size(thumbSize, thumbSize).Radius(10).Padding(2).Label(fmt.Sprintf("图片 %d", i+1)).
+			cell := ui.ButtonBase(c).Size(thumbSize, thumbSize).Radius(10).Padding(2).Label(marker(p.ID)).
 				Tooltip("点一下放大，再点收起")
 			if i == b.preview {
 				cell.Background(t.Accent)
@@ -605,6 +669,10 @@ func (b *bar) thumbs(c *ui.Context) {
 				if b.busy && i >= b.sent {
 					img.Opacity(0.45)
 				}
+				// Its number, as in the marker in the text.
+				ui.Box(c).Absolute().Left(4).Bottom(4).Height(16).PaddingX(5).Radius(8).Background(ui.Hex("#000000").Alpha(0.55)).Children(func() {
+					ui.Text(c, strconv.Itoa(p.ID)).FontSize(10).FontWeight(600).TextColor(ui.Hex("#ffffff"))
+				})
 				switch {
 				case b.busy && i < b.sent:
 					ui.Box(c).Absolute().Right(4).Bottom(4).Size(18, 18).Radius(9).Background(t.Success).Children(func() {
@@ -619,8 +687,7 @@ func (b *bar) thumbs(c *ui.Context) {
 						ui.Row(c).Fill().Center().Children(func() { ui.Icon(c, closeIcon).Size(10, 10).TextColor(ui.Hex("#ffffff")) })
 					})
 					if x.Clicked() {
-						b.pics = append(b.pics[:i:i], b.pics[i+1:]...)
-						b.preview = -1
+						b.removePicture(i)
 						return
 					}
 				}
@@ -634,6 +701,14 @@ func (b *bar) thumbs(c *ui.Context) {
 			}
 		}
 	})
+}
+
+// removePicture takes a picture off, and its marker out of the text.
+func (b *bar) removePicture(i int) {
+	b.text = strings.ReplaceAll(b.text, marker(b.pics[i].ID), "")
+	b.prev = b.text
+	b.pics = append(b.pics[:i:i], b.pics[i+1:]...)
+	b.preview = -1
 }
 
 // large shows a picture at a readable size; Esc or a click closes it.

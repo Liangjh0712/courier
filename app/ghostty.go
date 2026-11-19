@@ -46,8 +46,8 @@ const probeScript = `on run argv
 	end tell
 end run`
 
-// sendScript: argv is the terminal ID expected, then "image", or "text" or
-// "insert" and the text ("insert" leaves out the Enter). It refuses when the
+// sendScript: argv is the terminal ID expected, then what to do: "image"
+// (Ctrl+V), "enter", or "insert" and a text to type in. It refuses when the
 // focused terminal is no longer that one.
 const sendScript = `on run argv
 	set expected to item 1 of argv
@@ -59,13 +59,12 @@ const sendScript = `on run argv
 		if (id of t) is not expected then error "Ghostty 当前的终端变了，没有发送" number 1003
 		if what is "image" then
 			send key "v" modifiers "control" to t
+		else if what is "enter" then
+			delay 0.15
+			send key "enter" to t
 		else
 			set msg to item 3 of argv
 			if msg is not "" then input text msg to t
-			if what is "text" then
-				delay 0.15
-				send key "enter" to t
-			end if
 		end if
 	end tell
 end run`
@@ -114,33 +113,61 @@ func probe() (target, error) {
 	return target{ID: id, Title: title}, nil
 }
 
-// deliver types the pictures and the text into terminal id, then Enter
-// unless insert. Pictures are PNG; done is called after each one, and the
-// clipboard is restored after the last.
-func deliver(id, text string, pictures [][]byte, insert bool, done func(n int)) error {
-	if len(pictures) > 0 {
+// segment is a piece of a message: a text to type in, or a PNG picture.
+type segment struct {
+	Text    string
+	Picture []byte
+}
+
+// settle is how long to wait after a picture's Ctrl+V: the program reads the
+// clipboard and (a remote client) uploads it before the next piece may come.
+func settle(picture []byte) time.Duration {
+	return imageSettle + time.Duration(len(picture)>>20)*300*time.Millisecond
+}
+
+// deliver types the pieces into terminal id in order, then Enter unless
+// insert. done is called after each picture with how many went; the
+// clipboard, used for pictures, is restored at the end.
+func deliver(id string, pieces []segment, insert bool, done func(n int)) error {
+	pictures := 0
+	for _, p := range pieces {
+		if p.Picture != nil {
+			pictures++
+		}
+	}
+	if pictures > 0 {
 		saved, rerr := mygo.Clipboard.Read()
 		defer func() {
 			if rerr == nil {
 				_ = mygo.Clipboard.Write(saved)
 			}
 		}()
-		for i, p := range pictures {
-			if err := mygo.Clipboard.Write(transfer.New(transfer.NewItem(transfer.Bytes(transfer.PNG, p)))); err != nil {
-				return errors.New("图片放不进剪贴板：" + err.Error())
+	}
+	sent := 0
+	for _, p := range pieces {
+		if p.Picture == nil {
+			if p.Text == "" {
+				continue
 			}
-			if _, err := osascript(sendScript, id, "image"); err != nil {
+			if _, err := osascript(sendScript, id, "insert", p.Text); err != nil {
 				return err
 			}
-			time.Sleep(imageSettle)
-			done(i + 1)
+			continue
 		}
+		if err := mygo.Clipboard.Write(transfer.New(transfer.NewItem(transfer.Bytes(transfer.PNG, p.Picture)))); err != nil {
+			return errors.New("图片放不进剪贴板：" + err.Error())
+		}
+		if _, err := osascript(sendScript, id, "image"); err != nil {
+			return err
+		}
+		time.Sleep(settle(p.Picture))
+		sent++
+		done(sent)
 	}
-	mode := "text"
 	if insert {
-		mode = "insert"
+		return nil
 	}
-	_, err := osascript(sendScript, id, mode, text)
+	_, err := osascript(sendScript, id, "enter")
 	return err
 }
 

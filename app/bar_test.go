@@ -87,7 +87,11 @@ func TestSend(t *testing.T) {
 	main := make(chan func(), 1)
 	b.update = func(fn func()) { main <- fn }
 	var got []string
-	b.deliver = func(id, text string, pics [][]byte, insert bool, done func(int)) error {
+	b.deliver = func(id string, parts []segment, insert bool, done func(int)) error {
+		text := ""
+		for _, p := range parts {
+			text += p.Text
+		}
 		got = append(got, id+"|"+text)
 		if text == "fail" {
 			return errors.New("Ghostty 当前的终端变了，没有发送")
@@ -159,6 +163,45 @@ func TestHistory(t *testing.T) {
 	}
 }
 
+func TestPicturesKeepTheirPlace(t *testing.T) {
+	var shot bytes.Buffer
+	_ = png.Encode(&shot, image.NewRGBA(image.Rect(0, 0, 4, 4)))
+	b := testBar()
+	b.text = "先看这里"
+	b.sel = [2]int{4, 4}
+	b.attach(shot.Bytes())
+	if b.text != "先看这里[图片1]" || b.caret != 9 {
+		t.Fatalf("marker at the caret: %q caret %d", b.text, b.caret)
+	}
+	b.text += "然后这张"
+	b.sel = [2]int{2, 2} // a second picture in the middle of the first words
+	b.attach(shot.Bytes())
+	if b.text != "先看[图片2]这里[图片1]然后这张" {
+		t.Fatalf("%q", b.text)
+	}
+	parts := pieces(b.text, b.pics)
+	var order []string
+	for _, p := range parts {
+		if p.Picture != nil {
+			order = append(order, "图")
+		} else {
+			order = append(order, p.Text)
+		}
+	}
+	if got := strings.Join(order, "|"); got != "先看|图|这里|图|然后这张" {
+		t.Fatalf("order: %s", got)
+	}
+	b.removePicture(1) // picture 2
+	if b.text != "先看这里[图片1]然后这张" || len(b.pics) != 1 {
+		t.Fatalf("removed with its marker: %q", b.text)
+	}
+	// A marker deleted by hand: the picture still goes, last; a stray marker stays text.
+	parts = pieces("没有标记了 [图片9]", b.pics)
+	if len(parts) != 2 || parts[0].Text != "没有标记了 [图片9]" || parts[1].Picture == nil {
+		t.Fatalf("%+v", parts)
+	}
+}
+
 func TestClearUndo(t *testing.T) {
 	b := testBar()
 	b.text = "草稿"
@@ -196,9 +239,13 @@ func TestPreview(t *testing.T) {
 	}{
 		{"empty", 92, func(b *bar) {}},
 		{"draft", 200, func(b *bar) {
-			b.text = long
+			b.text = "这个报错帮我看一下："
+			b.sel = [2]int{9, 9}
 			b.attach(shot.Bytes())
+			b.text += "\n还有这张，是不是 herdr 远程客户端的问题？"
+			b.sel = [2]int{len([]rune(b.text)), len([]rune(b.text))}
 			b.attach(shot.Bytes())
+			b.text += "\n看完给个结论就行"
 		}},
 		{"sending", 200, func(b *bar) {
 			b.text = long
