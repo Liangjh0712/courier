@@ -150,6 +150,13 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
 
     func textDidChange(_ notification: Notification) { textChanged() }
 
+    private func textChangedQuietly() {
+        let empty = editor.textStorage!.length == 0
+        clearButton.isHidden = empty
+        sendButton.isEnabled = !empty
+        bubble.hasDraft = !empty
+    }
+
     /// A click on a picture shows it large.
     func textView(_ textView: NSTextView, clickedOn cell: NSTextAttachmentCellProtocol, in cellFrame: NSRect, at charIndex: Int) {
         guard let a = cell.attachment as? ShotAttachment, let img = NSImage(data: a.png) else { return }
@@ -224,7 +231,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         setFrame(f)
     }
 
-    private func setFrame(_ frame: NSRect) {
+    private func setFrame(_ frame: NSRect, animate: Bool = false) {
         var f = frame
         let screen = NSScreen.screens.first { $0.visibleFrame.intersects(f) } ?? NSScreen.main
         if let v = screen?.visibleFrame {
@@ -233,17 +240,21 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
             f.origin.y = min(max(f.minY, v.minY + 6), v.maxY - f.height - 6)
         }
         placing = true
-        panel.setFrame(f, display: true)
+        panel.setFrame(f, display: true, animate: animate)
         placing = false
     }
 
     func windowDidBecomeKey(_ notification: Notification) { fade() }
     func windowDidResignKey(_ notification: Notification) { fade() }
-    func windowDidResize(_ notification: Notification) { fitHeight() }
+    // Only a resize by hand re-fits (the width changed); our own setFrame calls
+    // would otherwise loop back here (fitHeight → setFrame → didResize → …).
+    func windowDidResize(_ notification: Notification) {
+        if !placing { fitHeight() }
+    }
 
     /// Out of the way while not in use: faint until written in or pointed at.
     private func fade() {
-        let want: CGFloat = panel.isKeyWindow || hovering ? 1 : Box.idleAlpha
+        let want: CGFloat = panel.isKeyWindow || hovering || busy ? 1 : Box.idleAlpha
         guard panel.alphaValue != want else { return }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = want == 1 ? 0.12 : 0.35
@@ -254,7 +265,12 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
     /// The box as high as the text needs, between minBody and maxBody; the
     /// bottom edge stays (it grows upward, like a chat's input). Only the width
     /// can be dragged.
-    private func fitHeight() {
+    private var fitting = false
+
+    private func fitHeight(animate: Bool = false) {
+        guard !fitting else { return }
+        fitting = true
+        defer { fitting = false }
         guard panel != nil, let lm = editor.layoutManager, let tc = editor.textContainer else { return }
         lm.ensureLayout(for: tc)
         let textH = ceil(lm.usedRect(for: tc).height + editor.textContainerInset.height * 2)
@@ -267,7 +283,7 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         if abs(panel.frame.height - want) > 0.5 {
             var f = panel.frame
             f.size.height = want
-            setFrame(f)
+            setFrame(f, animate: animate)
         }
         panel.invalidateShadow()
     }
@@ -391,44 +407,82 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
             return
         }
         busy = true
-        // Out of the way, so the app in front gets the keys again, at its own caret.
+        sending(true)
+        // Give the keyboard back without going away: ordering the panel out
+        // hands the keys to the app in front (at its own caret), ordering it
+        // straight back in shows it again without taking them.
         panel.orderOut(nil)
+        panel.orderFrontRegardless()
         sender.send(parts, to: target, insertOnly: insertOnly) { [weak self] outcome in
             self?.sent(outcome, text: text, insertOnly: insertOnly)
         }
     }
 
+    /// While sending: the text dims and the send button spins.
+    private func sending(_ on: Bool) {
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15
+            editor.animator().alphaValue = on ? 0.45 : 1
+        }
+        sendButton.spinning = on
+        editor.isEditable = !on
+    }
+
     private func sent(_ outcome: SendOutcome, text: String, insertOnly: Bool) {
-        busy = false
-        var failed = false
         var back: NSRunningApplication?
+        var failed = false
         switch outcome {
         case .sent(let returnTo):
             back = returnTo
             remember(trimmedEnd(withoutMarkers(text)), in: &history)
             hist = history.count
             nextID = 1
-            replaceAll("", undoable: false)
-            save()
-            show(insertOnly ? "已填入" : "已发送")
-        case .aborted(let why):
+        case .aborted:
             failed = true
-            show(why + "，没有发完，草稿还在", bad: true, keep: true)
         }
-        if let back, !back.isTerminated {
-            // You went elsewhere while it was sending: back there.
-            back.activate(options: [.activateIgnoringOtherApps])
-            panel.orderFrontRegardless()
-            trace("back to \(back.localizedName ?? "?")")
-        } else if takeKeyboardAfterSend || failed {
-            // A panel made key by code while the app is in the back looks key
-            // but the keyboard stays with the app in front: take the front
-            // (the target is remembered, so the next send still goes there).
-            NSApp.activate(ignoringOtherApps: true)
-            showBox()
-        } else {
-            panel.orderFrontRegardless()
+        let finish = { [weak self] in
+            guard let self else { return }
+            self.busy = false
+            self.sending(false)
+            if case .aborted(let why) = outcome {
+                self.show(why + "，没有发完，草稿还在", bad: true, keep: true)
+            } else {
+                self.show(insertOnly ? "已填入" : "已发送")
+            }
+            if let back, !back.isTerminated {
+                // You went elsewhere while it was sending: back there.
+                back.activate(options: [.activateIgnoringOtherApps])
+                trace("back to \(back.localizedName ?? "?")")
+                self.fade()
+            } else if self.takeKeyboardAfterSend || failed {
+                // A panel made key by code while the app is in the back looks
+                // key but the keyboard stays with the app in front: take the
+                // front (the target is remembered, so the next send still goes there).
+                NSApp.activate(ignoringOtherApps: true)
+                self.panel.makeKey()
+                self.panel.makeFirstResponder(self.editor)
+            } else {
+                self.fade()
+            }
         }
+        guard !failed else {
+            finish()
+            return
+        }
+        // The sent text fades out and the box settles to one line.
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.12
+            editor.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self else { return }
+            self.editor.textStorage!.setAttributedString(NSAttributedString())
+            self.editor.undoManager?.removeAllActions()
+            self.editor.typingAttributes = baseAttributes
+            self.save()
+            self.textChangedQuietly()
+            self.fitHeight(animate: true)
+            finish()
+        })
     }
 
     // MARK: target menu
@@ -621,6 +675,9 @@ final class Box: NSObject, NSTextViewDelegate, NSWindowDelegate {
         scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
+        // Overlay scrollers take no width: a scroller coming and going would
+        // rewrap the text and change the height it asks for.
+        scroll.scrollerStyle = .overlay
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.documentView = editor

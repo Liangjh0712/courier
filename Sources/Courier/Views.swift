@@ -67,6 +67,17 @@ func iconButton(_ symbol: String, _ tip: String, _ target: AnyObject, _ action: 
 /// The send button: an accent-colored circle with an arrow.
 final class SendButton: NSButton {
     var onMenu: (() -> NSMenu)?
+    private let spinner = NSProgressIndicator()
+    private var arrow: NSImage?
+
+    var spinning = false {
+        didSet {
+            guard spinning != oldValue else { return }
+            image = spinning ? nil : arrow
+            spinner.isHidden = !spinning
+            if spinning { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        }
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -79,6 +90,16 @@ final class SendButton: NSButton {
         layer?.cornerRadius = 14
         translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([widthAnchor.constraint(equalToConstant: 28), heightAnchor.constraint(equalToConstant: 28)])
+        arrow = image
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.appearance = NSAppearance(named: .darkAqua)
+        spinner.isHidden = true
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(spinner)
+        NSLayoutConstraint.activate([
+            spinner.centerXAnchor.constraint(equalTo: centerXAnchor), spinner.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
     }
 
     required init?(coder: NSCoder) { fatalError("not coded") }
